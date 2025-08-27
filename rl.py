@@ -1,0 +1,161 @@
+
+"""Problem (math_baseline): 4 points
+(a) Write a script to evaluate Qwen 2.5 Math 1.5B zero-shot performance on MATH. This script
+should (1) load the MATH validation examples from /data/a5-alignment/MATH/validation.jsonl,
+(2) format them as string prompts to the language model using the r1_zero prompt, and (3) gen-
+erate outputs for each example. This script should also (4) calculate evaluation metrics and
+(5) serialize the examples, model generations, and corresponding evaluation scores to disk for
+analysis in subsequent problems.
+It might be helpful for your implementation to include a method evaluate_vllm with arguments
+similar to the following, as you will be able to reuse it later:
+def evaluate_vllm(
+vllm_model: LLM,
+reward_fn: Callable[[str, str], dict[str, float]],
+prompts: List[str],
+eval_sampling_params: SamplingParams
+) -> None:
+Evaluate a language model on a list of prompts,
+compute evaluation metrics, and serialize results to disk.
+Deliverable: A script to evaluate baseline zero-shot MATH performance.
+(b) Run your evaluation script on Qwen 2.5 Math 1.5B. How many model generations fall into each
+of the following categories: (1) correct with both format and answer reward 1, (2) format reward
+1 and answer reward 0, (3) format reward 0 and answer reward 0? Observing at least 10 cases
+where format reward is 0, do you think the issue is with the base model’s output, or the parser?
+Why? What about in (at least 10) cases where format reward is 1 but answer reward is 0?
+Deliverable: Commentary on the model and reward function performance, including examples
+of each category.
+(c) How well does the Qwen 2.5 Math 1.5B zero-shot baseline perform on MATH?
+Deliverable: 1-2 sentences with evaluation metrics."""
+import torch
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import json
+import os
+
+
+
+
+def test():
+    # Load model and tokenizer with CPU optimization
+    print("Loading model and tokenizer with accelerate (CPU)...")
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-Math-1.5B",
+        torch_dtype=torch.float32,  # Use float32 for CPU compatibility
+        device_map=None  # Don't use device_map on CPU
+    )
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
+
+    def test_model(prompt, max_new_tokens=100):
+        """Test the model with a given prompt"""
+        inputs = tokenizer(prompt, return_tensors="pt")
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, 
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        return tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    # Test the model with a simple example
+    print("Testing with simple math problem:")
+    test_prompt = "What is 5 + 3? Please show your work."
+    response = test_model(test_prompt)
+    print(f"Prompt: {test_prompt}")
+    print(f"Response: {response}\n")
+
+
+from typing import Callable, List
+
+
+def evaluate_vllm(
+    model,
+    reward_fn: Callable[[str, str], dict[str, float]],
+    prompts: List[str],
+    eval_sampling_params
+) -> None:
+    """
+    Evaluate a language model on a list of prompts,
+    compute evaluation metrics, and serialize results to disk.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    for prompt in prompts:
+        with torch.no_grad():
+            inputs = tokenizer(prompt, return_tensors="pt")
+            response = model.generate(**inputs, **eval_sampling_params)
+            reward = reward_fn(prompt, tokenizer.decode(response[0], skip_special_tokens=True))
+            print(reward)
+
+
+def reward_fn(prompt, response):
+    return 1 if response.strip() == prompt.strip() else 0
+
+
+
+
+
+"""Problem (tokenize_prompt_and_output): Prompt and output tokenization (2 points)
+Deliverable: Implement a method tokenize_prompt_and_output that tokenizes the question and
+output separately, concatenates them together, and constructs a response_mask. The following
+interface is recommended:
+def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer): Tokenize the
+prompt and output strings, and construct a mask that is 1 for the response tokens and 0 for
+other tokens (prompt or padding).
+Args:
+prompt_strs: list[str] List of prompt strings.
+output_strs: list[str] List of output strings.
+tokenizer: PreTrainedTokenizer Tokenizer to use for tokenization.
+Returns:
+dict[str, torch.Tensor]. Let prompt_and_output_lens be a list containing the lengths of
+the tokenized prompt and output strings. Then the returned dictionary should have the
+following keys:
+input_ids torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+the tokenized prompt and output strings, with the final token sliced off.
+labels torch.Tensor of shape (batch_size, max(prompt_and_output_lens) - 1):
+shifted input ids, i.e., the input ids without the first token.
+response_mask torch.Tensor of shape (batch_size, max(prompt_and_output_lens) -
+1): a mask on the response tokens in the labels.
+To test your code, implement [adapters.run_tokenize_prompt_and_output]. Then, run the
+test with uv run pytest -k test_tokenize_prompt_and_output and make sure your
+implementation passes it."""
+
+import torch
+from typing import List
+
+
+def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
+    prompt_tokens = tokenizer(prompt_strs)['input_ids']
+    output_tokens = tokenizer(output_strs)['input_ids']
+
+    batch_sz = len(prompt_tokens)
+
+    prompt_and_output_lens = [len(p) + len(o) for p, o in zip(prompt_tokens, output_tokens)]
+    padded_len = max(prompt_and_output_lens)
+
+    input_ids = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
+    labels = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
+    response_mask = torch.zeros((batch_sz, padded_len - 1), dtype=torch.bool)
+
+    for i, (p_toks, o_toks) in enumerate(zip(prompt_tokens, output_tokens)):
+        p_o_concat = torch.tensor(p_toks + o_toks)
+        concat_len = len(p_o_concat)
+        p_o_concat_padded = F.pad(p_o_concat, (0, padded_len - concat_len), 'constant', tokenizer.eos_token_id)
+
+        input_ids[i] = p_o_concat_padded[:-1]
+        labels[i] = p_o_concat_padded[1:]
+
+        o_start = len(p_toks) - 1
+        o_end = concat_len - 1
+        response_mask[i, o_start:o_end] = True
+    
+    return {
+        'input_ids': input_ids,
+        'labels': labels,
+        'response_mask': response_mask,
+    }
+
+
+
+
+
