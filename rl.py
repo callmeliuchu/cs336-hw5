@@ -259,3 +259,48 @@ def masked_normalize(
 ) -> torch.Tensor:
     tensor_sum = torch.sum(tensor * mask, dim=dim)
     return tensor_sum / normalize_constant
+
+
+"""Problem (sft_microbatch_train_step): Microbatch train step (3 points)
+Deliverable: Implement a single micro-batch update for SFT, including cross-entropy loss, summing
+with a mask, and gradient scaling.
+The following interface is recommended:
+def sft_microbatch_train_step(
+policy_log_probs: torch.Tensor,
+response_mask: torch.Tensor,
+gradient_accumulation_steps: int,
+normalize_constant: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+Execute a forward-and-backward pass on a microbatch.
+Args:
+policy_log_probs (batch_size, sequence_length), per-token log-probabilities from the
+SFT policy being trained.
+response_mask (batch_size, sequence_length), 1 for response tokens, 0 for
+prompt/padding.
+gradient_accumulation_steps Number of microbatches per optimizer step.
+normalize_constant The constant by which to divide the sum. It is fine to leave this as 1.0.
+Returns:
+tuple[torch.Tensor, dict[str, torch.Tensor]].
+12
+loss scalar tensor. The microbatch loss, adjusted for gradient accumulation. We return
+this so we can log it.
+metadata Dict with metadata from the underlying loss call, and any other statistics you
+might want to log.
+Implementation tips:
+• You should call loss.backward() in this function. Make sure to adjust for gradient
+accumulation.
+To test your code, implement [adapters.run_sft_microbatch_train_step]. Then run uv
+run pytest -k test_sft_microbatch_train_step and confirm it passes."""
+
+
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    # policy_log_probs,response_mask,gradient_accumulation_steps,normalize_constant
+    loss  = masked_normalize(-policy_log_probs,response_mask, normalize_constant, -1).mean() / gradient_accumulation_steps 
+    loss.backward()
+    return loss, {}
+
