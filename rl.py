@@ -226,3 +226,36 @@ def get_response_log_probs(model,input_ids,labels,return_token_entropy=False):
         "log_probs": labels_logprobs,
         "token_entropy": token_entropy if return_token_entropy else None
     }
+
+"""Problem (masked_normalize): Masked normalize (1 point)
+Deliverable: Implement a method masked_normalize that sums over tensor elements and
+normalizes by a constant while respecting a boolean mask.
+The following interface is recommended:
+def masked_normalize(
+tensor: torch.Tensor,
+mask: torch.Tensor,
+normalize_constant: float,
+dim: int | None = None,
+) -> torch.Tensor:
+11
+Sum over a dimension and normalize by a constant, considering only those elements where mask
+== 1.
+Args:
+tensor: torch.Tensor The tensor to sum and normalize.
+mask: torch.Tensor Same shape as tensor; positions with 1 are included in the sum.
+normalize_constant: float the constant to divide by for normalization.
+dim: int | None the dimension to sum along before normalization. If None, sum over all
+dimensions.
+Returns:
+torch.Tensor the normalized sum, where masked elements (mask == 0) don’t contribute to
+the sum.
+To test your code, implement [adapters.run_masked_normalize]. Then run uv run pytest -k test_masked_normalize and ensure it passes."""
+
+def masked_normalize(
+    tensor: torch.Tensor,
+    mask: torch.Tensor,
+    normalize_constant: float,
+    dim: int | None = None,
+) -> torch.Tensor:
+    tensor_sum = torch.sum(tensor * mask, dim=dim)
+    return tensor_sum / normalize_constant
