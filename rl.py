@@ -159,3 +159,23 @@ def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
 
 
 
+"""Problem (compute_entropy): Per-token entropy (1 point)
+Deliverable: Implement a method compute_entropy that computes the per-token entropy of
+next-token predictions.
+The following interface is recommended:
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+Get the entropy of the next-token predictions (i.e., entropy over the vocabulary dimension).
+Args:
+logits: torch.Tensor Tensor of shape (batch_size, sequence_length, vocab_size)
+containing unnormalized logits.
+Returns:
+torch.Tensor Shape (batch_size, sequence_length). The entropy for each next-token
+prediction.
+Note: you should use a numerically stable method (e.g., using logsumexp) to avoid overflow.
+To test your code, implement [adapters.run_compute_entropy]. Then run uv run pytest -k test_compute_entropy and ensure your implementation passes."""
+
+def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
+    next_token_logits = logits
+    probs = F.softmax(next_token_logits,dim=-1)
+    total = torch.sum(next_token_logits * probs,dim=-1)
+    return torch.logsumexp(next_token_logits,dim=-1) - total
