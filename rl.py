@@ -179,3 +179,50 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     probs = F.softmax(next_token_logits,dim=-1)
     total = torch.sum(next_token_logits * probs,dim=-1)
     return torch.logsumexp(next_token_logits,dim=-1) - total
+
+
+"""Problem (get_response_log_probs): Response log-probs (and entropy) (2 points)
+Deliverable: Implement a method get_response_log_probs that gets per-token conditional
+log-probabilities (given the previous tokens) from a causal language model, and optionally the
+entropy of the model’s next-token distribution.
+The following interface is recommended:
+10
+def get_response_log_probs(
+model: PreTrainedModel,
+input_ids: torch.Tensor,
+labels: torch.Tensor,
+return_token_entropy: bool = False,
+) -> dict[str, torch.Tensor]:
+Args:
+model: PreTrainedModel HuggingFace model used for scoring (placed on the correct device
+and in inference mode if gradients should not be computed).
+input_ids: torch.Tensor shape (batch_size, sequence_length), concatenated prompt +
+response tokens as produced by your tokenization method.
+labels: torch.Tensor shape (batch_size, sequence_length), labels as produced by your
+tokenization method.
+return_token_entropy: bool If True, also return per-token entropy by calling
+compute_entropy.
+Returns:
+dict[str, torch.Tensor].
+"log_probs" shape (batch_size, sequence_length), conditional log-probabilities
+log pθ (xt | x<t).
+"token_entropy" optional, shape (batch_size, sequence_length), per-token entropy
+for each position (present only if return_token_entropy=True).
+Implementation tips:
+• Obtain logits with model(input_ids).logits.
+To test your code, implement [adapters.run_get_response_log_probs]. Then run uv run
+pytest -k test_get_response_log_probs and ensure the test passes."""
+
+
+def get_response_log_probs(model,input_ids,labels,return_token_entropy=False):
+    ### input_ids (batch_size, sequence_length)
+    ### labels (batch_size, sequence_length)
+    logits = model(input_ids).logits # (batch_size, sequence_length, vocab_size)
+    logprobs = torch.log_softmax(logits,dim=-1)
+    labels_logprobs = logprobs.gather(dim=-1,index=labels.unsqueeze(-1)).squeeze(-1) # (batch_size, sequence_length)
+    if return_token_entropy:
+        token_entropy = compute_entropy(logits)
+    return {
+        "log_probs": labels_logprobs,
+        "token_entropy": token_entropy if return_token_entropy else None
+    }
