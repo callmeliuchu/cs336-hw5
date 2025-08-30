@@ -479,3 +479,73 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
 
 
 
+"""Problem (compute_naive_policy_gradient_loss): Naive policy gradient (1 point)
+Deliverable: Implement a method compute_naive_policy_gradient_loss that computes the
+per-token policy-gradient loss using raw rewards or pre-computed advantages.
+The following interface is recommended:
+def compute_naive_policy_gradient_loss(
+raw_rewards_or_advantages: torch.Tensor,
+policy_log_probs: torch.Tensor,
+) -> torch.Tensor:
+Compute the policy-gradient loss at every token, where raw_rewards_or_advantages is either
+the raw reward or an already-normalized advantage.
+Args:
+raw_rewards_or_advantages: torch.Tensor Shape (batch_size, 1), scalar
+reward/advantage for each rollout response.
+policy_log_probs: torch.Tensor Shape (batch_size, sequence_length), logprobs for
+each token.
+Returns:
+torch.Tensor Shape (batch_size, sequence_length), the per-token policy-gradient loss (to
+be aggregated across the batch and sequence dimensions in the training loop).
+Implementation tips:
+• Broadcast the raw_rewards_or_advantages over the sequence_length dimension.
+To test your code, implement [adapters.run_compute_naive_policy_gradient_loss]. Then
+run uv run pytest -k test_compute_naive_policy_gradient_loss and ensure the test
+passes."""
+
+def compute_naive_policy_gradient_loss(
+        raw_rewards_or_advantages: torch.Tensor,
+        policy_log_probs: torch.Tensor,
+    ) -> torch.Tensor:
+    return - raw_rewards_or_advantages * policy_log_probs
+
+"""Problem (compute_grpo_clip_loss): GRPO-Clip loss (2 points)
+Deliverable: Implement a method compute_grpo_clip_loss that computes the per-token
+GRPO-Clip loss.
+The following interface is recommended:
+def compute_grpo_clip_loss(
+advantages: torch.Tensor,
+policy_log_probs: torch.Tensor,
+old_log_probs: torch.Tensor,
+cliprange: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+Args:
+advantages: torch.Tensor Shape (batch_size, 1), per-example advantages A.
+policy_log_probs: torch.Tensor Shape (batch_size, sequence_length), per-token log
+probs from the policy being trained.
+old_log_probs: torch.Tensor Shape (batch_size, sequence_length), per-token log probs
+from the old policy.
+cliprange: float Clip parameter ϵ (e.g. 0.2).
+Returns:
+tuple[torch.Tensor, dict[str, torch.Tensor]].
+loss torch.Tensor of shape (batch_size, sequence_length), the per-token clipped
+loss.
+metadata dict containing whatever you want to log. We suggest logging whether each
+token was clipped or not, i.e., whether the clipped policy gradient loss on the RHS of
+the min was lower than the LHS.
+Implementation tips:
+• Broadcast advantages over sequence_length.
+To test your code, implement [adapters.run_compute_grpo_clip_loss]. Then run uv run
+pytest -k test_compute_grpo_clip_loss and ensure the test passes."""
+
+
+def compute_grpo_clip_loss(
+        advantages: torch.Tensor,
+        policy_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        cliprange: float,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    ratio = torch.exp(policy_log_probs - old_log_probs)
+    return -torch.min(ratio * advantages,torch.clip(ratio,1-cliprange,1+cliprange) * advantages) , {}
+
+    
