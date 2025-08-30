@@ -549,3 +549,55 @@ def compute_grpo_clip_loss(
     return -torch.min(ratio * advantages,torch.clip(ratio,1-cliprange,1+cliprange) * advantages) , {}
 
     
+"""Problem (compute_policy_gradient_loss): Policy-gradient wrapper (1 point)
+Deliverable: Implement compute_policy_gradient_loss, a convenience wrapper that dispatches
+to the correct loss routine (no_baseline, reinforce_with_baseline, or grpo_clip) and returns
+both the per-token loss and any auxiliary statistics.
+The following interface is recommended:
+def compute_policy_gradient_loss(
+policy_log_probs: torch.Tensor,
+loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+raw_rewards: torch.Tensor | None = None,
+advantages: torch.Tensor | None = None,
+old_log_probs: torch.Tensor | None = None,
+cliprange: float | None = None,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+Select and compute the desired policy-gradient loss.
+Args:
+policy_log_probs (batch_size, sequence_length), per-token log-probabilities from the
+policy being trained.
+loss_type One of "no_baseline", "reinforce_with_baseline", or "grpo_clip".
+raw_rewards Required if loss_type == "no_baseline"; shape (batch_size, 1).
+advantages Required for "reinforce_with_baseline" and "grpo_clip"; shape
+(batch_size, 1).
+old_log_probs Required for "grpo_clip"; shape (batch_size, sequence_length).
+cliprange Required for "grpo_clip"; scalar ϵ used for clipping.
+Returns:
+tuple[torch.Tensor, dict[str, torch.Tensor]].
+loss (batch_size, sequence_length), per-token loss.
+metadata dict, statistics from the underlying routine (e.g., clip fraction for GRPO-Clip).
+Implementation tips:
+• Delegate to compute_naive_policy_gradient_loss or compute_grpo_clip_loss.
+• Perform argument checks (see assertion pattern above).
+• Aggregate any returned metadata into a single dict.
+To test your code, implement [adapters.run_compute_policy_gradient_loss]. Then run uv
+run pytest -k test_compute_policy_gradient_loss and verify it passes."""
+
+from typing import Literal
+
+
+def compute_policy_gradient_loss(
+    policy_log_probs: torch.Tensor,
+    loss_type: Literal["no_baseline", "reinforce_with_baseline", "grpo_clip"],
+    raw_rewards: torch.Tensor | None = None,
+    advantages: torch.Tensor | None = None,
+    old_log_probs: torch.Tensor | None = None,
+    cliprange: float | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    if loss_type == 'no_baseline':
+        return compute_naive_policy_gradient_loss(raw_rewards,policy_log_probs), {}
+    elif loss_type == 'reinforce_with_baseline':
+        return compute_naive_policy_gradient_loss(advantages,policy_log_probs), {}
+    else:
+        loss, _= compute_grpo_clip_loss(advantages,policy_log_probs,old_log_probs,cliprange)
+        return loss, {}
