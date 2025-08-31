@@ -86,8 +86,7 @@ def evaluate_vllm(
             print(reward)
 
 
-def reward_fn(prompt, response):
-    return 1 
+
 
 
 
@@ -335,12 +334,18 @@ def load_test_data():
 
 import random
 
+
+
+def format_question(question):
+    prompt = f"""here is the question: {question} think step by step and answer the question. and use <answer> </answer> to wrap the answer."""
+    return prompt.format(question=question)
+
 def sample_data(data_arr,num_samples=None):
     if num_samples is None:
         arr = data_arr
     else:
         arr =  random.sample(data_arr,num_samples)
-    prompt_strs = [data['question'] for data in arr]
+    prompt_strs = [format_question(data['question']) for data in arr]
     output_strs = [data['answer'] for data in arr]
     return prompt_strs, output_strs
 
@@ -456,6 +461,10 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
         rewards_arr.append(rewards_dict['reward'])
         format_rewards_arr.append(rewards_dict['format_reward'])
         answer_rewards_arr.append(rewards_dict['answer_reward'])
+    
+    print('rewards_arr',rewards_arr)
+    print('format_rewards_arr',format_rewards_arr)
+    print('answer_rewards_arr',answer_rewards_arr)
     rewards = torch.tensor(rewards_arr)
     format_rewards = torch.tensor(format_rewards_arr)
     answer_rewards = torch.tensor(answer_rewards_arr)
@@ -466,15 +475,16 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
         rewards_normalized = (rewards - rewards_mean) / (rewards_std + advantage_eps) # (rollout_batch_size,)
     else:
         rewards_normalized = (rewards - rewards_mean) # (rollout_batch_size,)
-    rewards_normalized = rewards_normalized.reshape(-1) # (rollout_batch_size,)
-    rewards = rewards.reshape(-1) # (rollout_batch_size,)
-    format_rewards = format_rewards.reshape(-1) # (rollout_batch_size,)
-    answer_rewards = answer_rewards.reshape(-1) # (rollout_batch_size,)
+    rewards_normalized = rewards_normalized.reshape(-1,1) # (rollout_batch_size,)
+    rewards = rewards.reshape(-1,1) # (rollout_batch_size,)
+    format_rewards = format_rewards.reshape(-1,1) # (rollout_batch_size,)
+    answer_rewards = answer_rewards.reshape(-1,1) # (rollout_batch_size,)
     return rewards_normalized, rewards, {
         'rewards_mean': rewards_mean,
         'rewards_std': rewards_std,
         'format_rewards': format_rewards,
         'answer_rewards': answer_rewards,
+        'raw_rewards': rewards
     }
 
 
@@ -699,3 +709,205 @@ def grpo_microbatch_train_step(
     loss = loss.mean() / gradient_accumulation_steps
     loss.backward()
     return loss, metadata
+
+
+"""Putting it all together: GRPO train loop. Now we will put together a complete train loop for
+GRPO. You should refer to the algorithm in Section 7.1 for the overall structure, using the methods we’ve
+implemented where appropriate.
+Below we provide some starter hyperparameters. If you have a correct implementation, you should see
+reasonable results with these.
+n_grpo_steps: int = 200
+learning_rate: float = 1e-5
+27
+advantage_eps: float = 1e-6
+rollout_batch_size: int = 256
+group_size: int = 8
+sampling_temperature: float = 1.0
+sampling_min_tokens: int = 4 # As in Expiter, disallow empty string responses
+sampling_max_tokens: int = 1024
+epochs_per_rollout_batch: int = 1 # On-policy
+train_batch_size: int = 256 # On-policy
+gradient_accumulation_steps: int = 128 # microbatch size is 2, will fit on H100
+gpu_memory_utilization: float = 0.85
+loss_type: Literal[
+"no_baseline",
+"reinforce_with_baseline",
+"grpo_clip",
+] = "reinforce_with_baseline"
+use_std_normalization: bool = True
+optimizer = torch.optim.AdamW(
+policy.parameters(),
+lr=learning_rate,
+weight_decay=0.0,
+betas=(0.9, 0.95),
+)
+These default hyperparameters will start you in the on-policy setting—for each rollout batch, we take a
+single gradient step. In terms of hyperparameters, this means that train_batch_size is equal to rollout_ ⌋
+batch_size, and epochs_per_rollout_batch is equal to 1.
+Here are some sanity check asserts and constants that should remove some edge cases and point you in
+the right direction:
+assert train_batch_size % gradient_accumulation_steps == 0, (
+"train_batch_size must be divisible by gradient_accumulation_steps"
+)
+micro_train_batch_size = train_batch_size // gradient_accumulation_steps
+assert rollout_batch_size % group_size == 0, (
+"rollout_batch_size must be divisible by group_size"
+)
+n_prompts_per_rollout_batch = rollout_batch_size // group_size
+assert train_batch_size >= group_size, (
+"train_batch_size must be greater than or equal to group_size"
+)
+n_microbatches_per_rollout_batch = rollout_batch_size // micro_train_batch_size
+And here are a few additional tips:
+• Remember to use the r1_zero prompt, and direct vLLM to stop generation at the second answer tag
+</answer>, as in the previous experiments.
+• We suggest using typer for argument parsing.
+• Use gradient clipping with clip value 1.0.
+• You should routinely log validation rewards (e.g., every 5 or 10 steps). You should evaluate on at least
+1024 validation examples to compare hyperparameters, as CoT/RL evaluations can be noisy.
+• With our implementation of the losses, GRPO-Clip should only be used when off-policy (since it
+requires the old log-probabilities).
+• In the off-policy setting with multiple epochs of gradient updates per rollout batch, it would be wasteful
+to recompute the old log-probabilities for each epoch. Instead, we can compute the old log-probabilities
+28
+once and reuse them for each epoch.
+• You should not differentiate with respect to the old log-probabilities.
+• You should log some or all of the following for each optimizer update:
+– The loss.
+– Gradient norm.
+– Token entropy.
+– Clip fraction, if off-policy.
+– Train rewards (total, format, and answer).
+– Anything else you think could be useful for debugging.
+Problem (grpo_train_loop): GRPO train loop (5 points)
+Deliverable: Implement a complete train loop for GRPO. Begin training a policy on MATH and
+confirm that you see validation rewards improving, along with sensible rollouts over time. Provide a
+plot with the validation rewards with respect to steps, and a few example rollouts over time."""
+
+
+def reward_fn(response, truth):
+    """ rewards_dict = reward_fn(resp,truth)
+        rewards_arr.append(rewards_dict['reward'])
+        format_rewards_arr.append(rewards_dict['format_reward'])
+        answer_rewards_arr.append(rewards_dict['answer_reward'])"""
+    print('response =========>',response)
+    print('truth =========>',truth)
+    rewards_dict = {}
+    if '<answer>' in response and '</answer>' in response:
+        rewards_dict['reward'] = 0.5
+        rewards_dict['format_reward'] = 0.5
+        rewards_dict['answer_reward'] = 0.5
+    else:
+        rewards_dict['reward'] = 0.0
+        rewards_dict['format_reward'] = 0.0
+        rewards_dict['answer_reward'] = 0.0
+    return rewards_dict
+
+
+def generate_model_response(model, tokenizer, prompt_strs, max_new_tokens=100, temperature=0.7):
+    """
+    使用模型生成文本响应
+    
+    Args:
+        model: 语言模型
+        tokenizer: 分词器
+        prompt_strs: 提示词列表
+        max_new_tokens: 最大生成token数
+        temperature: 采样温度
+    
+    Returns:
+        list[str]: 生成的响应文本列表
+    """
+    responses = []
+    
+    for prompt in prompt_strs:
+        # 对提示词进行编码
+        inputs = tokenizer(prompt, return_tensors="pt")
+        
+        # 生成文本
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id
+            )
+        
+        # 解码生成的文本（只取新生成的部分）
+        generated_text = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        responses.append(generated_text)
+    
+    return responses
+
+
+def grpo_train_loop(cfg):
+    n_grpo_steps = cfg['n_grpo_steps']
+    learning_rate = cfg['learning_rate']
+    advantage_eps = cfg['advantage_eps']
+    rollout_batch_size = cfg['rollout_batch_size']
+    group_size = cfg['group_size']
+    sampling_temperature = cfg['sampling_temperature']
+    sampling_min_tokens = cfg['sampling_min_tokens']
+    sampling_max_tokens = cfg['sampling_max_tokens']
+    epochs_per_rollout_batch = cfg['epochs_per_rollout_batch']
+    train_batch_size = cfg['train_batch_size']
+    gradient_accumulation_steps = cfg['gradient_accumulation_steps']
+    gpu_memory_utilization = cfg['gpu_memory_utilization']
+    loss_type = cfg['loss_type']
+    use_std_normalization = cfg['use_std_normalization']
+    train_data_arr = load_train_data()
+    test_data_arr = load_test_data()
+    test_prompt_strs, test_output_strs = sample_data(test_data_arr)
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-Math-1.5B",
+    )
+    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
+    for step in range(n_grpo_steps):
+        prompt_strs, output_strs = sample_data(train_data_arr,8)
+        res = tokenize_prompt_and_output(prompt_strs,output_strs,tokenizer)
+        policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']
+        old_log_probs = policy_log_probs.detach().clone()
+        response_mask = res['response_mask']
+        responses = generate_model_response(model, tokenizer, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
+        print('xxxxx responses =========>',responses)
+        rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization)
+        for _ in range(epochs_per_rollout_batch):
+            policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']
+            optimizer.zero_grad()
+            raw_rewards = metadata['raw_rewards']
+            advantages = rewards_normalized
+            cliprange = cfg['cliprange']
+
+            print('policy_log_probs',policy_log_probs.shape)
+            print('rew_rewards',raw_rewards.shape)
+            print('advantages',advantages.shape)
+            print('old_log_probs',old_log_probs.shape)
+            print('cliprange',cliprange)
+            loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
+            optimizer.step()
+            print('loss',loss)
+
+
+
+config = {
+    'n_grpo_steps': 100,
+    'learning_rate': 1e-5,
+    'advantage_eps': 1e-6,
+    'rollout_batch_size': 256,
+    'group_size': 8,
+    'sampling_temperature': 1.0,
+    'sampling_min_tokens': 4,
+    'sampling_max_tokens': 1024,
+    'epochs_per_rollout_batch': 1,
+    'train_batch_size': 256,
+    'gradient_accumulation_steps': 128,
+    'gpu_memory_utilization': 0.85,
+    'loss_type': 'reinforce_with_baseline',
+    'use_std_normalization': True,
+    'cliprange': 0.2
+}
+
+grpo_train_loop(config)
