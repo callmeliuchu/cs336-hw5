@@ -1194,6 +1194,18 @@ def grpo_train_loop(cfg):
             # 只打印关键数据
             print(f'Step {step}: advantages=[{advantages.min().item():.3f}, {advantages.max().item():.3f}], '
                   f'log_probs=[{policy_log_probs.min().item():.3f}, {policy_log_probs.max().item():.3f}]')
+            
+            # 检查输入数据是否包含NaN
+            if torch.isnan(policy_log_probs).any():
+                print(f"WARNING: policy_log_probs contains NaN before backward")
+                continue
+            if torch.isnan(advantages).any():
+                print(f"WARNING: advantages contains NaN before backward")
+                continue
+            if torch.isnan(old_log_probs).any():
+                print(f"WARNING: old_log_probs contains NaN before backward")
+                continue
+                
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
             
             # 检查损失值是否为NaN或无穷大
@@ -1201,11 +1213,24 @@ def grpo_train_loop(cfg):
                 print(f"WARNING: Loss is {loss.item()}, skipping step")
                 continue
             
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # 梯度裁剪 - 使用更严格的值
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             
             optimizer.step()
             print(f'Loss: {loss.item():.6f}')
+            
+            # 检查模型权重是否包含NaN
+            nan_params = 0
+            total_params = 0
+            for name, param in model.named_parameters():
+                total_params += 1
+                if torch.isnan(param).any():
+                    nan_params += 1
+                    print(f"WARNING: Parameter {name} contains NaN")
+            
+            if nan_params > 0:
+                print(f"WARNING: {nan_params}/{total_params} parameters contain NaN, stopping training")
+                break
             
             # 根据频率同步vLLM推理模型权重
             if (step + 1) % sync_frequency == 0:
@@ -1232,7 +1257,7 @@ def grpo_train_loop(cfg):
 
 config = {
     'n_grpo_steps': 100,
-    'learning_rate': 1e-5,
+    'learning_rate': 5e-6,  # 降低学习率
     'advantage_eps': 1e-6,
     'rollout_batch_size': 128,  # 双GPU可以支持更大的批次
     'group_size': 8,  # 恢复原始组大小
@@ -1241,7 +1266,7 @@ config = {
     'sampling_max_tokens': 1024,  # 恢复原始生成长度
     'epochs_per_rollout_batch': 1,
     'train_batch_size': 128,  # 双GPU可以支持更大的训练批次
-    'gradient_accumulation_steps': 64,  # 恢复梯度累积步数
+    'gradient_accumulation_steps': 8,  # 降低梯度累积步数
     'loss_type': 'reinforce_with_baseline',
     'use_std_normalization': True,
     'cliprange': 0.2
