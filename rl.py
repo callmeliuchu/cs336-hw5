@@ -1244,8 +1244,7 @@ def grpo_train_loop(cfg):
             pipeline_parallel_size=1,
             dtype="half",  # 使用半精度
             max_num_batched_tokens=4096,  # 可以使用更多批处理token
-            max_num_seqs=8,  # 可以使用更多并发序列
-            device="cuda:1"  # 指定使用GPU 1
+            max_num_seqs=8  # 可以使用更多并发序列
         )
         use_vllm = True
         print("成功加载vLLM推理模型")
