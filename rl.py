@@ -1235,12 +1235,16 @@ def grpo_train_loop(cfg):
     # 加载vLLM推理模型到GPU 1
     print(f"加载vLLM推理模型到{inference_device}...")
     try:
+        # 设置环境变量，只使用GPU 1
+        import os
+        os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+        
         vllm_model = LLM(
             model="Qwen/Qwen2.5-Math-1.5B",
             trust_remote_code=True,
             gpu_memory_utilization=vllm_gpu_memory_utilization,
             max_model_len=2048,  # 可以使用更长的序列，因为独占GPU
-            tensor_parallel_size=1,
+            tensor_parallel_size=1,  # 只在GPU 1上运行
             pipeline_parallel_size=1,
             dtype="half",  # 使用半精度
             max_num_batched_tokens=4096,  # 可以使用更多批处理token
