@@ -987,46 +987,6 @@ def check_gpu_memory():
         print("No CUDA devices found")
 
 
-def test_reward_function():
-    """
-    测试奖励函数的功能
-    """
-    print("Testing reward function...")
-    
-    # 测试用例1: 完美格式和正确答案
-    response1 = "Let me solve this step by step. First, I need to calculate... The answer is <answer>72</answer>"
-    truth1 = "Natalia sold 48/2 = <<48/2=24>>24 clips in May.\nNatalia sold 48+24 = <<48+24=72>>72 clips altogether in April and May.\n#### 72"
-    result1 = reward_fn(response1, truth1)
-    print(f"Test 1 (perfect): {result1}")
-    
-    # 测试用例2: 格式正确但答案错误
-    response2 = "The calculation shows that the answer is <answer>100</answer>"
-    truth2 = "#### 72"
-    result2 = reward_fn(response2, truth2)
-    print(f"Test 2 (format correct, answer wrong): {result2}")
-    
-    # 测试用例3: 没有格式标签但答案正确
-    response3 = "After calculating, I get 72 as the final answer."
-    truth3 = "#### 72"
-    result3 = reward_fn(response3, truth3)
-    print(f"Test 3 (no format, answer correct): {result3}")
-    
-    # 测试用例4: 完全错误的响应
-    response4 = "I don't know how to solve this problem."
-    truth4 = "#### 72"
-    result4 = reward_fn(response4, truth4)
-    print(f"Test 4 (completely wrong): {result4}")
-    
-    # 测试用例5: 分数答案
-    response5 = "The answer is <answer>1/2</answer>"
-    truth5 = "#### 0.5"
-    result5 = reward_fn(response5, truth5)
-    print(f"Test 5 (fraction): {result5}")
-    
-    print("Reward function test completed!")
-
-
-
 
 
 def init_vllm(model_id: str, gpu_memory_utilization: float = 0.85):
@@ -1219,8 +1179,55 @@ def grpo_train_loop(cfg):
                 
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
             
-            optimizer.step()
+            # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
+            
+            # 手动更新参数
+            nan_params_found = False
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    # 检查梯度是否包含NaN或Inf
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        print(f"WARNING: Gradient for {name} contains NaN/Inf, skipping update")
+                        continue
+                    
+                    # 手动更新参数: param = param - lr * grad
+                    lr = optimizer.param_groups[0]['lr']
+                    
+                    # 梯度裁剪
+                    grad_norm = param.grad.norm().item()
+                    max_grad_norm = 0.1
+                    if grad_norm > max_grad_norm:
+                        param.grad = param.grad * (max_grad_norm / grad_norm)
+                        print(f"Gradient clipped for {name}: {grad_norm:.6f} -> {max_grad_norm:.6f}")
+                    
+                    param_update = lr * param.grad
+                    
+                    # 检查更新量是否包含NaN或Inf
+                    if torch.isnan(param_update).any() or torch.isinf(param_update).any():
+                        print(f"WARNING: Parameter update for {name} contains NaN/Inf")
+                        nan_params_found = True
+                        continue
+                    
+                    # 检查更新前的参数
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        print(f"WARNING: Parameter {name} already contains NaN/Inf before update")
+                        nan_params_found = True
+                        continue
+                    
+                    # 执行参数更新
+                    param.data = param.data - param_update
+                    
+                    # 检查更新后的参数
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+                        print(f"  Update amount: mean={param_update.mean().item():.8f}, std={param_update.std().item():.8f}")
+                        print(f"  Learning rate: {lr}")
+                        nan_params_found = True
+            
+            if nan_params_found:
+                print("WARNING: Found NaN/Inf parameters during manual update, stopping training")
+                break
             
             # 根据频率同步vLLM推理模型权重
             if (step + 1) % sync_frequency == 0:
