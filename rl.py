@@ -1071,8 +1071,7 @@ def update_vllm_model_weights(vllm_model, train_model, tokenizer, gpu_memory_uti
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=2048,  # 可以使用更长的序列
             tensor_parallel_size=1,  # 单GPU
-            pipeline_parallel_size=1,
-            device="cuda:1"  # 指定使用GPU 1
+            pipeline_parallel_size=1
         )
         
         print("vLLM模型权重更新完成！")
@@ -1094,8 +1093,7 @@ def update_vllm_model_weights(vllm_model, train_model, tokenizer, gpu_memory_uti
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=2048,
                 tensor_parallel_size=1,
-                pipeline_parallel_size=1,
-                device="cuda:1"  # 指定使用GPU 1
+                pipeline_parallel_size=1
             )
             print("成功回退到原始vLLM模型")
             return new_vllm_model
