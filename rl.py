@@ -1229,6 +1229,7 @@ def grpo_train_loop(cfg):
             inf_grad_count = 0
             for name, param in model.named_parameters():
                 if param.grad is not None:
+                    print(f"Gradient for {name}: {param.grad}")
                     if torch.isnan(param.grad).any():
                         nan_grad_count += 1
                         print(f"WARNING: Gradient for {name} contains NaN")
