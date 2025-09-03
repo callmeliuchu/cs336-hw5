@@ -1148,7 +1148,27 @@ def grpo_train_loop(cfg):
         response_mask = res['response_mask']
         # 使用vLLM进行推理
         responses = generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
+        
+        # 每隔几轮打印responses例子
+        if step % 5 == 0:  # 每5步打印一次
+            print(f"\n=== Step {step} - Sample Responses ===")
+            for i in range(min(3, len(prompt_strs))):  # 打印前3个例子
+                print(f"\nExample {i+1}:")
+                print(f"Prompt: {prompt_strs[i][:100]}...")
+                print(f"Response: {responses[i][:200]}...")
+                print(f"Ground Truth: {output_strs[i][:100]}...")
+            print("=" * 50)
+        
         rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
+        
+        # 每隔几轮打印奖励统计
+        if step % 5 == 0:  # 每5步打印一次
+            print(f"\n=== Step {step} - Reward Statistics ===")
+            print(f"Raw rewards: {rewards.flatten().tolist()}")
+            print(f"Advantages: {rewards_normalized.flatten().tolist()}")
+            print(f"Reward mean: {rewards.mean().item():.4f}, std: {rewards.std().item():.4f}")
+            print(f"Advantage mean: {rewards_normalized.mean().item():.4f}, std: {rewards_normalized.std().item():.4f}")
+            print("=" * 50)
         for _ in range(epochs_per_rollout_batch):
             # 清理显存
             if torch.cuda.is_available():
@@ -1199,7 +1219,7 @@ def grpo_train_loop(cfg):
                     max_grad_norm = 0.1
                     if grad_norm > max_grad_norm:
                         param.grad = param.grad * (max_grad_norm / grad_norm)
-                        print(f"Gradient clipped for {name}: {grad_norm:.6f} -> {max_grad_norm:.6f}")
+                        # print(f"Gradient clipped for {name}: {grad_norm:.6f} -> {max_grad_norm:.6f}")
                     
                     param_update = lr * param.grad
                     
@@ -1253,7 +1273,7 @@ def grpo_train_loop(cfg):
 
 
 config = {
-    'n_grpo_steps': 100,
+    'n_grpo_steps': 500,
     'learning_rate': 1e-6,  # 进一步降低学习率
     'advantage_eps': 1e-6,
     'rollout_batch_size': 128,  # 双GPU可以支持更大的批次
