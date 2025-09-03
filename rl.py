@@ -32,6 +32,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import os
 import gc
+from vllm import LLM
 
 # 设置环境变量
 # 双GPU配置：GPU 0用于推理，GPU 1用于训练
@@ -1034,43 +1035,37 @@ def test_reward_function():
 
 
 
-def sync_inference_model_weights(inference_model, train_model):
+def init_vllm(model_id: str, gpu_memory_utilization: float = 0.85):
     """
-    将训练模型的权重同步到推理模型
-    
-    Args:
-        inference_model: 推理模型
-        train_model: 训练模型
+    初始化vLLM模型
     """
-    print("同步推理模型权重...")
-    try:
-        with torch.no_grad():
-            for inf_param, train_param in zip(inference_model.parameters(), train_model.parameters()):
-                # 检查权重是否有效
-                if torch.isnan(train_param.data).any() or torch.isinf(train_param.data).any():
-                    print("警告: 训练模型权重包含NaN或Inf，跳过同步")
-                    continue
-                
-                # 将训练模型的权重复制到推理模型
-                inf_param.data.copy_(train_param.data)
-        
-        # 同步后清理缓存
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        
-        print("推理模型权重同步完成")
-    except Exception as e:
-        print(f"权重同步失败: {e}")
-        print("继续使用当前推理模型权重")
+    return LLM(
+        model=model_id,
+        gpu_memory_utilization=gpu_memory_utilization,
+        dtype=torch.bfloat16,
+        enable_prefix_caching=True,
+    )
 
 
-def generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_tokens=100, temperature=0.7, device=None):
+def load_policy_into_vllm_instance(policy, llm):
     """
-    使用PyTorch模型生成文本响应（优化显存使用）
+    Copied from https://github.com/huggingface/trl/blob/
+    22759c820867c8659d00082ba8cf004e963873c1/trl/trainer/grpo_trainer.py#L670.
+    """
+    state_dict = policy.state_dict()
+    llm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    llm_model.load_weights(state_dict.items())
+
+
+
+
+
+def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=100, temperature=0.7):
+    """
+    使用vLLM模型生成文本响应
     
     Args:
-        model: PyTorch语言模型
-        tokenizer: 分词器
+        vllm_model: vLLM模型实例
         prompt_strs: 提示词列表
         max_new_tokens: 最大生成token数
         temperature: 采样温度
@@ -1078,68 +1073,37 @@ def generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_token
     Returns:
         list[str]: 生成的响应文本列表
     """
-    responses = []
+    from vllm import SamplingParams
     
-    # 设置模型为评估模式
-    model.eval()
+    # 创建采样参数对象
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=1.0,
+        max_tokens=max_new_tokens,
+        stop=["\n"]  # 在新行处停止生成
+    )
     
-    # 确保tokenizer有pad_token
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    for i, prompt in enumerate(prompt_strs):
-        try:
-            print(f"生成第{i+1}个响应...")
-            
-            # 对提示词进行编码
-            inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=512)
-            
-            # 确保输入在正确的设备上
-            if device is not None:
-                inputs = {k: v.to(device) for k, v in inputs.items()}
-            
-            # 检查输入是否有效
-            if inputs['input_ids'].numel() == 0:
-                print(f"警告: 第{i+1}个提示词为空，跳过")
-                responses.append("")
-                continue
-            
-            # 生成文本
-            with torch.no_grad():
-                # 使用更保守的生成参数
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=min(max_new_tokens, 512),  # 限制最大长度
-                    do_sample=True,
-                    temperature=max(temperature, 0.1),  # 确保温度不为0
-                    top_p=0.9,  # 添加top_p采样
-                    top_k=50,   # 添加top_k采样
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    use_cache=True,
-                    repetition_penalty=1.1,  # 添加重复惩罚
-                    no_repeat_ngram_size=2,  # 避免重复n-gram
-                    early_stopping=True
-                )
-            
-            # 解码生成的文本（只取新生成的部分）
-            input_length = inputs['input_ids'].shape[1]
-            generated_tokens = outputs[0][input_length:]
-            generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-            responses.append(generated_text)
-            
-            print(f"第{i+1}个响应生成完成: {generated_text[:50]}...")
-            
-        except Exception as e:
-            print(f"生成第{i+1}个响应时出错: {e}")
-            # 如果生成失败，返回一个默认响应
-            responses.append("生成失败")
+    try:
+        # 生成文本
+        outputs = vllm_model.generate(prompt_strs, sampling_params)
         
-        # 清理显存
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    
-    return responses
+        # 提取生成的文本
+        responses = []
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+            responses.append(generated_text)
+        
+        return responses
+        
+    except Exception as e:
+        print(f"vLLM生成失败: {e}")
+        # 如果vLLM生成失败，返回默认响应
+        return ["生成失败"] * len(prompt_strs)
+
+
+
 
 
 
@@ -1169,6 +1133,7 @@ def grpo_train_loop(cfg):
     inference_device = "cuda:0"  # 推理使用GPU 0
     
     print(f"双GPU配置：训练使用{train_device}，推理使用{inference_device}")
+    print("推理方式：vLLM")
     
     # 检查初始显存状态
     print("初始显存状态:")
@@ -1189,26 +1154,22 @@ def grpo_train_loop(cfg):
         print(f"训练模型加载失败: {e}")
         raise
     
-    # 加载推理模型到GPU 0
-    print(f"加载推理模型到{inference_device}...")
+    # 初始化vLLM推理模型
+    print(f"初始化vLLM推理模型...")
     try:
-        inference_model = AutoModelForCausalLM.from_pretrained(
-            "Qwen/Qwen2.5-Math-1.5B",
-            torch_dtype=torch.float16,  # 使用半精度以节省显存
-            device_map="cuda:0",  # 指定使用GPU 0
-            trust_remote_code=True,
-            low_cpu_mem_usage=True
+        vllm_model = init_vllm(
+            model_id="Qwen/Qwen2.5-Math-1.5B",
+            gpu_memory_utilization=0.85
         )
-        print("✓ 推理模型加载成功")
+        print("✓ vLLM推理模型初始化成功")
     except Exception as e:
-        print(f"推理模型加载失败: {e}")
+        print(f"vLLM初始化失败: {e}")
         raise
     
     # 确保模型在正确的设备上
     device = next(model.parameters()).device
-    inference_device_actual = next(inference_model.parameters()).device
     print(f"训练模型已加载到设备: {device}")
-    print(f"推理模型已加载到设备: {inference_device_actual}")
+    print(f"vLLM推理模型已初始化")
     
     # 检查模型加载后的显存状态
     print("模型加载后显存状态:")
@@ -1216,8 +1177,13 @@ def grpo_train_loop(cfg):
     
     optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
     
-    # 初始同步推理模型权重
-    sync_inference_model_weights(inference_model, model)
+    # 初始同步vLLM推理模型权重
+    print("初始同步vLLM推理模型权重...")
+    try:
+        load_policy_into_vllm_instance(model, vllm_model)
+        print("✓ vLLM推理模型权重同步成功")
+    except Exception as e:
+        print(f"vLLM权重同步失败: {e}")
     
     # 设置权重同步频率
     sync_frequency = 5  # 每5步同步一次权重
@@ -1228,9 +1194,9 @@ def grpo_train_loop(cfg):
         policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']
         old_log_probs = policy_log_probs.detach().clone()
         response_mask = res['response_mask']
-        # 使用推理模型进行推理
-        print("使用推理模型进行推理...")
-        responses = generate_model_response_pytorch(inference_model, tokenizer, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature, device=inference_device_actual)
+        # 使用vLLM进行推理
+        print("使用vLLM进行推理...")
+        responses = generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
         # print('xxxxx responses =========>',responses)
         rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
         for _ in range(epochs_per_rollout_batch):
@@ -1253,9 +1219,14 @@ def grpo_train_loop(cfg):
             optimizer.step()
             print('loss',loss)
             
-            # 根据频率同步推理模型权重
+            # 根据频率同步vLLM推理模型权重
             if (step + 1) % sync_frequency == 0:
-                sync_inference_model_weights(inference_model, model)
+                print(f"步骤 {step}: 同步vLLM推理模型权重...")
+                try:
+                    load_policy_into_vllm_instance(model, vllm_model)
+                    print("✓ vLLM推理模型权重同步成功")
+                except Exception as e:
+                    print(f"vLLM权重同步失败: {e}")
             
             # 训练后清理显存
             if torch.cuda.is_available():
