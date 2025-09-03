@@ -1225,7 +1225,7 @@ def grpo_train_loop(cfg):
     model = AutoModelForCausalLM.from_pretrained(
         "Qwen/Qwen2.5-Math-1.5B",
         torch_dtype=torch.float16,  # 使用半精度以节省显存
-        device_map={train_device: "auto"}  # 指定使用GPU 0
+        device_map="cuda:0"  # 指定使用GPU 0
     )
     
     # 确保模型在正确的设备上
