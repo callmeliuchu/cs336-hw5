@@ -1154,9 +1154,9 @@ def grpo_train_loop(cfg):
             print(f"\n=== Step {step} - Sample Responses ===")
             for i in range(min(3, len(prompt_strs))):  # 打印前3个例子
                 print(f"\nExample {i+1}:")
-                print(f"Prompt: {prompt_strs[i][:100]}...")
-                print(f"Response: {responses[i][:200]}...")
-                print(f"Ground Truth: {output_strs[i][:100]}...")
+                print(f"Prompt: {prompt_strs[i]}...")
+                print(f"Response: {responses[i]}...")
+                print(f"Ground Truth: {output_strs[i]}...")
             print("=" * 50)
         
         rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
