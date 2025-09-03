@@ -1208,10 +1208,10 @@ def grpo_train_loop(cfg):
     test_data_arr = load_test_data()
     test_prompt_strs, test_output_strs = sample_data(test_data_arr)
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
-    # 双GPU配置：GPU 0用于训练，GPU 1用于推理
-    train_device = "cuda:0"  # 训练使用GPU 0
-    inference_device = "cuda:1"  # 推理使用GPU 1
-    vllm_gpu_memory_utilization = 0.9  # vLLM可以使用更多显存，因为独占GPU 1
+    # 双GPU配置：GPU 0用于推理，GPU 1用于训练
+    train_device = "cuda:1"  # 训练使用GPU 1
+    inference_device = "cuda:0"  # 推理使用GPU 0
+    vllm_gpu_memory_utilization = 0.9  # vLLM可以使用更多显存，因为独占GPU 0
     
     print(f"双GPU配置：训练使用{train_device}，推理使用{inference_device}")
     print(f"vLLM推理使用{vllm_gpu_memory_utilization*100}%显存")
@@ -1220,24 +1220,24 @@ def grpo_train_loop(cfg):
     print("初始显存状态:")
     check_gpu_memory()
     
-    # 加载训练模型到GPU 0
+    # 加载训练模型到GPU 1
     print(f"加载训练模型到{train_device}...")
     model = AutoModelForCausalLM.from_pretrained(
         "Qwen/Qwen2.5-Math-1.5B",
         torch_dtype=torch.float16,  # 使用半精度以节省显存
-        device_map="cuda:0"  # 指定使用GPU 0
+        device_map="cuda:1"  # 指定使用GPU 1
     )
     
     # 确保模型在正确的设备上
     device = next(model.parameters()).device
     print(f"训练模型已加载到设备: {device}")
     
-    # 加载vLLM推理模型到GPU 1
+    # 加载vLLM推理模型到GPU 0
     print(f"加载vLLM推理模型到{inference_device}...")
     try:
-        # 设置环境变量，只使用GPU 1
+        # 设置环境变量，只使用GPU 0
         import os
-        os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         
         vllm_model = LLM(
             model="Qwen/Qwen2.5-Math-1.5B",
