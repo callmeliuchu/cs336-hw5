@@ -1213,11 +1213,61 @@ def grpo_train_loop(cfg):
                 print(f"WARNING: Loss is {loss.item()}, skipping step")
                 continue
             
-            # 梯度裁剪 - 使用更严格的值
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            # 检查optimizer.step()前后某个参数的变化
+            # 选择一个代表性的参数进行监控
+            sample_param = None
+            sample_param_name = None
+            for name, param in model.named_parameters():
+                if 'embed_tokens.weight' in name:  # 选择embedding层作为监控对象
+                    sample_param = param
+                    sample_param_name = name
+                    break
+            
+            if sample_param is not None:
+                # 记录更新前的参数值
+                param_before = sample_param.data.clone()
+                param_mean_before = param_before.mean().item()
+                param_std_before = param_before.std().item()
+                param_min_before = param_before.min().item()
+                param_max_before = param_before.max().item()
+                
+                # 记录梯度信息
+                if sample_param.grad is not None:
+                    grad_mean = sample_param.grad.mean().item()
+                    grad_std = sample_param.grad.std().item()
+                    grad_norm = sample_param.grad.norm().item()
+                    print(f"Before step - {sample_param_name}:")
+                    print(f"  Param: mean={param_mean_before:.6f}, std={param_std_before:.6f}, range=[{param_min_before:.6f}, {param_max_before:.6f}]")
+                    print(f"  Grad: mean={grad_mean:.6f}, std={grad_std:.6f}, norm={grad_norm:.6f}")
+                else:
+                    print(f"Before step - {sample_param_name}: No gradient")
             
             optimizer.step()
             print(f'Loss: {loss.item():.6f}')
+            
+            # 检查更新后的参数值
+            if sample_param is not None:
+                param_after = sample_param.data
+                param_mean_after = param_after.mean().item()
+                param_std_after = param_after.std().item()
+                param_min_after = param_after.min().item()
+                param_max_after = param_after.max().item()
+                
+                # 计算参数变化
+                param_change = param_after - param_before
+                change_mean = param_change.mean().item()
+                change_std = param_change.std().item()
+                change_norm = param_change.norm().item()
+                
+                print(f"After step - {sample_param_name}:")
+                print(f"  Param: mean={param_mean_after:.6f}, std={param_std_after:.6f}, range=[{param_min_after:.6f}, {param_max_after:.6f}]")
+                print(f"  Change: mean={change_mean:.6f}, std={change_std:.6f}, norm={change_norm:.6f}")
+                
+                # 检查参数是否包含NaN
+                if torch.isnan(param_after).any():
+                    print(f"WARNING: {sample_param_name} contains NaN after optimizer.step()")
+                if torch.isinf(param_after).any():
+                    print(f"WARNING: {sample_param_name} contains Inf after optimizer.step()")
             
             # 检查模型权重是否包含NaN
             nan_params = 0
