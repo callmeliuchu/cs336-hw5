@@ -31,6 +31,12 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import os
+from vllm import LLM, SamplingParams
+
+# 设置环境变量以解决vLLM的multiprocessing问题
+# 双GPU配置：GPU 0用于训练，GPU 1用于推理
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 
 def test():
@@ -121,7 +127,7 @@ import torch
 from typing import List
 
 
-def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
+def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer, device=None):
     prompt_tokens = tokenizer(prompt_strs)['input_ids']
     output_tokens = tokenizer(output_strs)['input_ids']
 
@@ -130,12 +136,21 @@ def tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer):
     prompt_and_output_lens = [len(p) + len(o) for p, o in zip(prompt_tokens, output_tokens)]
     padded_len = max(prompt_and_output_lens)
 
-    input_ids = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
-    labels = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
-    response_mask = torch.zeros((batch_sz, padded_len - 1), dtype=torch.bool)
+    # 如果指定了设备，在指定设备上创建tensor
+    if device is not None:
+        input_ids = torch.empty((batch_sz, padded_len - 1), dtype=torch.long, device=device)
+        labels = torch.empty((batch_sz, padded_len - 1), dtype=torch.long, device=device)
+        response_mask = torch.zeros((batch_sz, padded_len - 1), dtype=torch.bool, device=device)
+    else:
+        input_ids = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
+        labels = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
+        response_mask = torch.zeros((batch_sz, padded_len - 1), dtype=torch.bool)
 
     for i, (p_toks, o_toks) in enumerate(zip(prompt_tokens, output_tokens)):
-        p_o_concat = torch.tensor(p_toks + o_toks)
+        if device is not None:
+            p_o_concat = torch.tensor(p_toks + o_toks, device=device)
+        else:
+            p_o_concat = torch.tensor(p_toks + o_toks)
         concat_len = len(p_o_concat)
         p_o_concat_padded = F.pad(p_o_concat, (0, padded_len - concat_len), 'constant', tokenizer.eos_token_id)
 
@@ -326,10 +341,10 @@ def load_data(path):
     return data_arr
 
 def load_train_data():
-    return load_data('/Users/liuchu/assignment5-alignment/data/gsm8k/train.jsonl')
+    return load_data('data/gsm8k/train.jsonl')
 
 def load_test_data():
-    return load_data('/Users/liuchu/assignment5-alignment/data/gsm8k/test.jsonl')
+    return load_data('data/gsm8k/test.jsonl')
 
 
 import random
@@ -451,7 +466,7 @@ run the test with uv run pytest -k test_compute_group_normalized_rewards and mak
 sure your implementation passes it."""
 
 
-def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground_truths,group_size,advantage_eps,normalize_by_std):
+def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground_truths,group_size,advantage_eps,normalize_by_std,device=None):
     # producing a dict with keys "reward", "format_reward", and "answer_reward".
     rewards_arr = []
     format_rewards_arr = []
@@ -465,9 +480,14 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
     print('rewards_arr',rewards_arr)
     print('format_rewards_arr',format_rewards_arr)
     print('answer_rewards_arr',answer_rewards_arr)
-    rewards = torch.tensor(rewards_arr)
-    format_rewards = torch.tensor(format_rewards_arr)
-    answer_rewards = torch.tensor(answer_rewards_arr)
+    if device is not None:
+        rewards = torch.tensor(rewards_arr, device=device)
+        format_rewards = torch.tensor(format_rewards_arr, device=device)
+        answer_rewards = torch.tensor(answer_rewards_arr, device=device)
+    else:
+        rewards = torch.tensor(rewards_arr)
+        format_rewards = torch.tensor(format_rewards_arr)
+        answer_rewards = torch.tensor(answer_rewards_arr)
     rewards = rewards.reshape(-1,group_size) # (rollout_batch_size, group_size)
     rewards_mean = rewards.mean(dim=-1,keepdim=True) # (rollout_batch_size,1)
     rewards_std = rewards.std(dim=-1,keepdim=True) # (rollout_batch_size,1)    
@@ -785,31 +805,311 @@ confirm that you see validation rewards improving, along with sensible rollouts 
 plot with the validation rewards with respect to steps, and a few example rollouts over time."""
 
 
+import re
+import math
+
+def extract_answer_from_response(response):
+    """
+    从模型响应中提取答案
+    
+    Args:
+        response: 模型的响应文本
+    
+    Returns:
+        str: 提取的答案，如果未找到则返回None
+    """
+    # 首先尝试从<answer>标签中提取
+    answer_pattern = r'<answer>(.*?)</answer>'
+    match = re.search(answer_pattern, response, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    
+    # 如果没有找到<answer>标签，尝试从####格式中提取（GSM8K格式）
+    gsm8k_pattern = r'####\s*([^\n]+)'
+    match = re.search(gsm8k_pattern, response)
+    if match:
+        return match.group(1).strip()
+    
+    # 尝试提取最后一个数字
+    numbers = re.findall(r'-?\d+\.?\d*', response)
+    if numbers:
+        return numbers[-1]
+    
+    return None
+
+def extract_answer_from_truth(truth):
+    """
+    从真实答案中提取数值答案
+    
+    Args:
+        truth: 真实答案文本
+    
+    Returns:
+        str: 提取的数值答案
+    """
+    # 尝试从####格式中提取（GSM8K格式）
+    gsm8k_pattern = r'####\s*([^\n]+)'
+    match = re.search(gsm8k_pattern, truth)
+    if match:
+        return match.group(1).strip()
+    
+    # 如果没有找到，尝试提取最后一个数字
+    numbers = re.findall(r'-?\d+\.?\d*', truth)
+    if numbers:
+        return numbers[-1]
+    
+    return truth.strip()
+
+def normalize_number(num_str):
+    """
+    标准化数字字符串，处理分数、小数等格式
+    
+    Args:
+        num_str: 数字字符串
+    
+    Returns:
+        float: 标准化后的数字，如果无法解析则返回None
+    """
+    if num_str is None:
+        return None
+    
+    # 移除空格
+    num_str = num_str.strip()
+    
+    # 处理分数格式 (如 "1/2", "3/4")
+    if '/' in num_str:
+        try:
+            parts = num_str.split('/')
+            if len(parts) == 2:
+                numerator = float(parts[0].strip())
+                denominator = float(parts[1].strip())
+                if denominator != 0:
+                    return numerator / denominator
+        except (ValueError, ZeroDivisionError):
+            pass
+    
+    # 处理普通数字
+    try:
+        return float(num_str)
+    except ValueError:
+        return None
+
 def reward_fn(response, truth):
-    """ rewards_dict = reward_fn(resp,truth)
-        rewards_arr.append(rewards_dict['reward'])
-        format_rewards_arr.append(rewards_dict['format_reward'])
-        answer_rewards_arr.append(rewards_dict['answer_reward'])"""
-    print('response =========>',response)
-    print('truth =========>',truth)
+    """
+    计算奖励函数，包括格式奖励和答案奖励
+    
+    Args:
+        response: 模型的响应
+        truth: 真实答案
+    
+    Returns:
+        dict: 包含reward, format_reward, answer_reward的字典
+    """
     rewards_dict = {}
+    
+    # 提取答案
+    response_answer = extract_answer_from_response(response)
+    truth_answer = extract_answer_from_truth(truth)
+    
+    # 计算格式奖励
+    format_reward = 0.0
     if '<answer>' in response and '</answer>' in response:
-        rewards_dict['reward'] = 0.5
-        rewards_dict['format_reward'] = 0.5
-        rewards_dict['answer_reward'] = 0.5
-    else:
-        rewards_dict['reward'] = 0.0
-        rewards_dict['format_reward'] = 0.0
-        rewards_dict['answer_reward'] = 0.0
+        format_reward = 1.0
+    elif response_answer is not None:
+        # 即使没有<answer>标签，如果能提取到答案也给部分格式奖励
+        format_reward = 0.5
+    
+    # 计算答案奖励
+    answer_reward = 0.0
+    if response_answer is not None and truth_answer is not None:
+        # 标准化数字
+        response_num = normalize_number(response_answer)
+        truth_num = normalize_number(truth_answer)
+        
+        if response_num is not None and truth_num is not None:
+            # 检查答案是否匹配
+            if abs(response_num - truth_num) < 1e-6:  # 使用小的容差处理浮点数精度问题
+                answer_reward = 1.0
+            else:
+                # 如果答案不匹配，根据数值接近程度给部分奖励
+                if truth_num != 0:
+                    relative_error = abs(response_num - truth_num) / abs(truth_num)
+                    if relative_error < 0.1:  # 误差在10%以内
+                        answer_reward = 0.5
+                    elif relative_error < 0.5:  # 误差在50%以内
+                        answer_reward = 0.2
+    
+    # 计算总奖励
+    total_reward = format_reward + answer_reward
+    
+    rewards_dict['reward'] = total_reward
+    rewards_dict['format_reward'] = format_reward
+    rewards_dict['answer_reward'] = answer_reward
+    
+    # 调试信息（可选）
+    if total_reward > 0:
+        print(f"Response: {response[:100]}...")
+        print(f"Truth: {truth}")
+        print(f"Extracted response answer: {response_answer}")
+        print(f"Extracted truth answer: {truth_answer}")
+        print(f"Format reward: {format_reward}, Answer reward: {answer_reward}")
+        print("---")
+    
     return rewards_dict
 
 
-def generate_model_response(model, tokenizer, prompt_strs, max_new_tokens=100, temperature=0.7):
+def check_gpu_memory():
     """
-    使用模型生成文本响应
+    检查GPU显存使用情况
+    """
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            total_memory = torch.cuda.get_device_properties(i).total_memory / 1024**3  # GB
+            allocated_memory = torch.cuda.memory_allocated(i) / 1024**3  # GB
+            cached_memory = torch.cuda.memory_reserved(i) / 1024**3  # GB
+            free_memory = total_memory - allocated_memory
+            
+            print(f"GPU {i}:")
+            print(f"  总显存: {total_memory:.2f} GB")
+            print(f"  已分配: {allocated_memory:.2f} GB ({allocated_memory/total_memory*100:.1f}%)")
+            print(f"  已缓存: {cached_memory:.2f} GB ({cached_memory/total_memory*100:.1f}%)")
+            print(f"  可用: {free_memory:.2f} GB ({free_memory/total_memory*100:.1f}%)")
+            print()
+    else:
+        print("未检测到CUDA设备")
+
+
+def test_reward_function():
+    """
+    测试奖励函数的功能
+    """
+    print("测试奖励函数...")
+    
+    # 测试用例1: 完美格式和正确答案
+    response1 = "Let me solve this step by step. First, I need to calculate... The answer is <answer>72</answer>"
+    truth1 = "Natalia sold 48/2 = <<48/2=24>>24 clips in May.\nNatalia sold 48+24 = <<48+24=72>>72 clips altogether in April and May.\n#### 72"
+    result1 = reward_fn(response1, truth1)
+    print(f"测试1 - 完美答案: {result1}")
+    
+    # 测试用例2: 格式正确但答案错误
+    response2 = "The calculation shows that the answer is <answer>100</answer>"
+    truth2 = "#### 72"
+    result2 = reward_fn(response2, truth2)
+    print(f"测试2 - 格式正确但答案错误: {result2}")
+    
+    # 测试用例3: 没有格式标签但答案正确
+    response3 = "After calculating, I get 72 as the final answer."
+    truth3 = "#### 72"
+    result3 = reward_fn(response3, truth3)
+    print(f"测试3 - 无格式标签但答案正确: {result3}")
+    
+    # 测试用例4: 完全错误的响应
+    response4 = "I don't know how to solve this problem."
+    truth4 = "#### 72"
+    result4 = reward_fn(response4, truth4)
+    print(f"测试4 - 完全错误: {result4}")
+    
+    # 测试用例5: 分数答案
+    response5 = "The answer is <answer>1/2</answer>"
+    truth5 = "#### 0.5"
+    result5 = reward_fn(response5, truth5)
+    print(f"测试5 - 分数答案: {result5}")
+    
+    print("奖励函数测试完成！")
+
+
+def update_vllm_model_weights(vllm_model, train_model, tokenizer, gpu_memory_utilization=0.5):
+    """
+    通过重新创建vLLM模型来更新权重（优化显存使用）
     
     Args:
-        model: 语言模型
+        vllm_model: 当前的vLLM模型实例
+        train_model: 训练用的PyTorch模型
+        tokenizer: 对应的tokenizer
+        gpu_memory_utilization: vLLM的GPU内存使用率（建议0.5，为训练留出一半显存）
+    
+    Returns:
+        LLM: 更新后的vLLM模型实例
+    """
+    import shutil
+    import os
+    import gc
+    import torch
+    
+    try:
+        print("开始更新vLLM模型权重...")
+        
+        # 清理GPU内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        
+        # 保存训练模型的权重到临时目录
+        temp_model_path = "./temp_model_weights"
+        
+        # 如果目录已存在，先删除
+        if os.path.exists(temp_model_path):
+            shutil.rmtree(temp_model_path)
+        
+        # 保存模型和tokenizer
+        print("保存训练模型权重...")
+        train_model.save_pretrained(temp_model_path)
+        tokenizer.save_pretrained(temp_model_path)
+        
+        # 删除旧的vLLM模型以释放内存
+        print("释放旧vLLM模型内存...")
+        del vllm_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+        
+        # 创建新的vLLM模型实例（使用GPU 1）
+        print(f"创建新的vLLM模型（使用{gpu_memory_utilization*100}%显存）...")
+        new_vllm_model = LLM(
+            model=temp_model_path,
+            trust_remote_code=True,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=2048,  # 可以使用更长的序列
+            tensor_parallel_size=1,  # 单GPU
+            pipeline_parallel_size=1,
+            device="cuda:1"  # 指定使用GPU 1
+        )
+        
+        print("vLLM模型权重更新完成！")
+        
+        # 清理临时文件（可选，保留用于调试）
+        # shutil.rmtree(temp_model_path)
+        
+        return new_vllm_model
+        
+    except Exception as e:
+        print(f"更新vLLM权重时出错: {e}")
+        print("尝试回退到原始模型...")
+        
+        # 如果更新失败，尝试重新加载原始模型
+        try:
+            new_vllm_model = LLM(
+                model="Qwen/Qwen2.5-Math-1.5B",
+                trust_remote_code=True,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=2048,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                device="cuda:1"  # 指定使用GPU 1
+            )
+            print("成功回退到原始vLLM模型")
+            return new_vllm_model
+        except Exception as e2:
+            print(f"回退也失败: {e2}")
+            return None
+
+
+def generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_tokens=100, temperature=0.7, device=None):
+    """
+    使用PyTorch模型生成文本响应（优化显存使用）
+    
+    Args:
+        model: PyTorch语言模型
         tokenizer: 分词器
         prompt_strs: 提示词列表
         max_new_tokens: 最大生成token数
@@ -820,9 +1120,15 @@ def generate_model_response(model, tokenizer, prompt_strs, max_new_tokens=100, t
     """
     responses = []
     
+    # 设置模型为评估模式
+    model.eval()
+    
     for prompt in prompt_strs:
         # 对提示词进行编码
         inputs = tokenizer(prompt, return_tensors="pt")
+        # 确保输入在正确的设备上
+        if device is not None:
+            inputs = {k: v.to(device) for k, v in inputs.items()}
         
         # 生成文本
         with torch.no_grad():
@@ -832,11 +1138,50 @@ def generate_model_response(model, tokenizer, prompt_strs, max_new_tokens=100, t
                 do_sample=True,
                 temperature=temperature,
                 pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=True  # 使用缓存以节省显存
             )
         
         # 解码生成的文本（只取新生成的部分）
         generated_text = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        responses.append(generated_text)
+        
+        # 清理显存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    return responses
+
+
+def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=100, temperature=0.7):
+    """
+    使用vLLM生成文本响应（优化显存使用）
+    
+    Args:
+        vllm_model: vLLM模型实例
+        prompt_strs: 提示词列表
+        max_new_tokens: 最大生成token数
+        temperature: 采样温度
+    
+    Returns:
+        list[str]: 生成的响应文本列表
+    """
+    # 设置采样参数
+    sampling_params = SamplingParams(
+        max_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=0.9,
+        stop=None
+    )
+    
+    # 批量生成
+    outputs = vllm_model.generate(prompt_strs, sampling_params)
+    
+    # 提取生成的文本
+    responses = []
+    for output in outputs:
+        # 获取生成的文本（去掉输入提示词部分）
+        generated_text = output.outputs[0].text
         responses.append(generated_text)
     
     return responses
@@ -857,25 +1202,84 @@ def grpo_train_loop(cfg):
     gpu_memory_utilization = cfg['gpu_memory_utilization']
     loss_type = cfg['loss_type']
     use_std_normalization = cfg['use_std_normalization']
+    # 添加vLLM模型更新频率控制
+    vllm_update_frequency = cfg.get('vllm_update_frequency', 1)  # 每N步更新一次vLLM模型
     train_data_arr = load_train_data()
     test_data_arr = load_test_data()
     test_prompt_strs, test_output_strs = sample_data(test_data_arr)
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
+    # 双GPU配置：GPU 0用于训练，GPU 1用于推理
+    train_device = "cuda:0"  # 训练使用GPU 0
+    inference_device = "cuda:1"  # 推理使用GPU 1
+    vllm_gpu_memory_utilization = 0.9  # vLLM可以使用更多显存，因为独占GPU 1
+    
+    print(f"双GPU配置：训练使用{train_device}，推理使用{inference_device}")
+    print(f"vLLM推理使用{vllm_gpu_memory_utilization*100}%显存")
+    
+    # 检查初始显存状态
+    print("初始显存状态:")
+    check_gpu_memory()
+    
+    # 加载训练模型到GPU 0
+    print(f"加载训练模型到{train_device}...")
     model = AutoModelForCausalLM.from_pretrained(
         "Qwen/Qwen2.5-Math-1.5B",
+        torch_dtype=torch.float16,  # 使用半精度以节省显存
+        device_map={train_device: "auto"}  # 指定使用GPU 0
     )
+    
+    # 确保模型在正确的设备上
+    device = next(model.parameters()).device
+    print(f"训练模型已加载到设备: {device}")
+    
+    # 加载vLLM推理模型到GPU 1
+    print(f"加载vLLM推理模型到{inference_device}...")
+    try:
+        vllm_model = LLM(
+            model="Qwen/Qwen2.5-Math-1.5B",
+            trust_remote_code=True,
+            gpu_memory_utilization=vllm_gpu_memory_utilization,
+            max_model_len=2048,  # 可以使用更长的序列，因为独占GPU
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            dtype="half",  # 使用半精度
+            max_num_batched_tokens=4096,  # 可以使用更多批处理token
+            max_num_seqs=8,  # 可以使用更多并发序列
+            device="cuda:1"  # 指定使用GPU 1
+        )
+        use_vllm = True
+        print("成功加载vLLM推理模型")
+    except Exception as e:
+        print(f"vLLM加载失败: {e}")
+        print("将使用PyTorch模型进行推理")
+        vllm_model = None
+        use_vllm = False
+    
+    # 检查模型加载后的显存状态
+    print("模型加载后显存状态:")
+    check_gpu_memory()
     optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
     for step in range(n_grpo_steps):
         prompt_strs, output_strs = sample_data(train_data_arr,8)
-        res = tokenize_prompt_and_output(prompt_strs,output_strs,tokenizer)
+        res = tokenize_prompt_and_output(prompt_strs,output_strs,tokenizer,device)
         policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']
         old_log_probs = policy_log_probs.detach().clone()
         response_mask = res['response_mask']
-        responses = generate_model_response(model, tokenizer, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
-        print('xxxxx responses =========>',responses)
-        rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization)
+        # 根据vLLM是否可用选择推理方法
+        if use_vllm and vllm_model is not None:
+            print("使用vLLM进行推理...")
+            responses = generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
+        else:
+            print("使用PyTorch进行推理...")
+            responses = generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature, device=device)
+        # print('xxxxx responses =========>',responses)
+        rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
         for _ in range(epochs_per_rollout_batch):
-            policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']
+            # 清理显存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
             optimizer.zero_grad()
             raw_rewards = metadata['raw_rewards']
             advantages = rewards_normalized
@@ -889,25 +1293,53 @@ def grpo_train_loop(cfg):
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
             optimizer.step()
             print('loss',loss)
-
+            
+            # 训练后清理显存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
+            # 根据更新频率决定是否更新vLLM模型
+            if use_vllm and vllm_model is not None and (step + 1) % vllm_update_frequency == 0:
+                print(f"步骤 {step}: 更新vLLM模型参数...")
+                new_vllm_model = update_vllm_model_weights(vllm_model, model, tokenizer, vllm_gpu_memory_utilization)
+                if new_vllm_model is not None:
+                    vllm_model = new_vllm_model
+                else:
+                    print("vLLM更新失败，切换到PyTorch推理")
+                    use_vllm = False
+    
+    # 训练结束后清理临时文件
+    import shutil
+    import os
+    temp_model_path = "./temp_model_weights"
+    if os.path.exists(temp_model_path):
+        print("清理临时模型文件...")
+        shutil.rmtree(temp_model_path)
+        print("临时文件清理完成")
 
 
 config = {
     'n_grpo_steps': 100,
     'learning_rate': 1e-5,
     'advantage_eps': 1e-6,
-    'rollout_batch_size': 256,
-    'group_size': 8,
+    'rollout_batch_size': 128,  # 双GPU可以支持更大的批次
+    'group_size': 8,  # 恢复原始组大小
     'sampling_temperature': 1.0,
     'sampling_min_tokens': 4,
-    'sampling_max_tokens': 1024,
+    'sampling_max_tokens': 1024,  # 恢复原始生成长度
     'epochs_per_rollout_batch': 1,
-    'train_batch_size': 256,
-    'gradient_accumulation_steps': 128,
-    'gpu_memory_utilization': 0.85,
+    'train_batch_size': 128,  # 双GPU可以支持更大的训练批次
+    'gradient_accumulation_steps': 64,  # 恢复梯度累积步数
+    'gpu_memory_utilization': 0.9,  # vLLM推理使用90%显存（独占GPU 1）
     'loss_type': 'reinforce_with_baseline',
     'use_std_normalization': True,
-    'cliprange': 0.2
+    'cliprange': 0.2,
+    'vllm_update_frequency': 5  # 恢复更新频率
 }
 
-grpo_train_loop(config)
+# 取消注释下面的行来测试奖励函数
+# test_reward_function()
+
+# 开始训练
+if __name__ == '__main__':
+    grpo_train_loop(config)
