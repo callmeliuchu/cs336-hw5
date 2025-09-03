@@ -498,10 +498,19 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
     rewards = rewards.reshape(-1,group_size) # (rollout_batch_size, group_size)
     rewards_mean = rewards.mean(dim=-1,keepdim=True) # (rollout_batch_size,1)
     rewards_std = rewards.std(dim=-1,keepdim=True) # (rollout_batch_size,1)    
+    print(f"normalize_by_std parameter: {normalize_by_std}")
     if normalize_by_std:
         rewards_normalized = (rewards - rewards_mean) / (rewards_std + advantage_eps) # (rollout_batch_size,)
+        print(f"Using std normalization: (rewards - mean) / (std + eps)")
     else:
         rewards_normalized = (rewards - rewards_mean) # (rollout_batch_size,)
+        print(f"Using mean normalization only: (rewards - mean)")
+    
+    # 裁剪advantages以防止数值溢出
+    print(f"Before clipping - advantages range: [{rewards_normalized.min().item():.6f}, {rewards_normalized.max().item():.6f}]")
+    rewards_normalized = torch.clamp(rewards_normalized, -5.0, 5.0)
+    print(f"After clipping - advantages range: [{rewards_normalized.min().item():.6f}, {rewards_normalized.max().item():.6f}]")
+    
     rewards_normalized = rewards_normalized.reshape(-1,1) # (rollout_batch_size,)
     rewards = rewards.reshape(-1,1) # (rollout_batch_size,)
     format_rewards = format_rewards.reshape(-1,1) # (rollout_batch_size,)
