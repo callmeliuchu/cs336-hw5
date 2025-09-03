@@ -1192,6 +1192,8 @@ def grpo_train_loop(cfg):
             cliprange = cfg['cliprange']
 
             # 只打印关键数据
+            print('advantages: ',advantages)
+            print('policy_log_probs: ',policy_log_probs)
             print(f'Step {step}: advantages=[{advantages.min().item():.3f}, {advantages.max().item():.3f}], '
                   f'log_probs=[{policy_log_probs.min().item():.3f}, {policy_log_probs.max().item():.3f}]')
             
