@@ -1213,6 +1213,22 @@ def grpo_train_loop(cfg):
                 print(f"WARNING: Loss is {loss.item()}, skipping step")
                 continue
             
+            # 检查所有参数的梯度是否包含NaN或Inf
+            nan_grad_count = 0
+            inf_grad_count = 0
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any():
+                        nan_grad_count += 1
+                        print(f"WARNING: Gradient for {name} contains NaN")
+                    if torch.isinf(param.grad).any():
+                        inf_grad_count += 1
+                        print(f"WARNING: Gradient for {name} contains Inf")
+            
+            if nan_grad_count > 0 or inf_grad_count > 0:
+                print(f"WARNING: Found {nan_grad_count} NaN gradients and {inf_grad_count} Inf gradients, skipping step")
+                continue
+            
             # 检查optimizer.step()前后某个参数的变化
             # 选择一个代表性的参数进行监控
             sample_param = None
@@ -1233,12 +1249,24 @@ def grpo_train_loop(cfg):
                 
                 # 记录梯度信息
                 if sample_param.grad is not None:
+                    # 检查梯度是否包含NaN或Inf
+                    grad_has_nan = torch.isnan(sample_param.grad).any().item()
+                    grad_has_inf = torch.isinf(sample_param.grad).any().item()
+                    
+                    if grad_has_nan or grad_has_inf:
+                        print(f"WARNING: Gradient for {sample_param_name} contains NaN: {grad_has_nan}, Inf: {grad_has_inf}")
+                        # 如果梯度包含NaN，跳过此步骤
+                        continue
+                    
                     grad_mean = sample_param.grad.mean().item()
                     grad_std = sample_param.grad.std().item()
                     grad_norm = sample_param.grad.norm().item()
+                    grad_min = sample_param.grad.min().item()
+                    grad_max = sample_param.grad.max().item()
+                    
                     print(f"Before step - {sample_param_name}:")
                     print(f"  Param: mean={param_mean_before:.6f}, std={param_std_before:.6f}, range=[{param_min_before:.6f}, {param_max_before:.6f}]")
-                    print(f"  Grad: mean={grad_mean:.6f}, std={grad_std:.6f}, norm={grad_norm:.6f}")
+                    print(f"  Grad: mean={grad_mean:.6f}, std={grad_std:.6f}, norm={grad_norm:.6f}, range=[{grad_min:.6f}, {grad_max:.6f}]")
                 else:
                     print(f"Before step - {sample_param_name}: No gradient")
             
@@ -1307,7 +1335,7 @@ def grpo_train_loop(cfg):
 
 config = {
     'n_grpo_steps': 100,
-    'learning_rate': 5e-6,  # 降低学习率
+    'learning_rate': 1e-6,  # 进一步降低学习率
     'advantage_eps': 1e-6,
     'rollout_batch_size': 128,  # 双GPU可以支持更大的批次
     'group_size': 8,  # 恢复原始组大小
