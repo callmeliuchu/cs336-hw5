@@ -501,7 +501,7 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
     print(f"normalize_by_std parameter: {normalize_by_std}")
     if normalize_by_std:
         rewards_normalized = (rewards - rewards_mean) / (rewards_std + advantage_eps) # (rollout_batch_size,)
-        print(f"Using std normalization: (rewards - mean) / (std + eps)")
+        print(f"Using std normalization: (rewards - mean) / (std + eps)",rewards,rewards_mean,rewards_std)
     else:
         rewards_normalized = (rewards - rewards_mean) # (rollout_batch_size,)
         print(f"Using mean normalization only: (rewards - mean)")
