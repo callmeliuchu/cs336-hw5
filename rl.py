@@ -37,6 +37,8 @@ import gc
 # 双GPU配置：GPU 0用于推理，GPU 1用于训练
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+# 设置CUDA调试环境变量
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'  # 同步CUDA操作，便于调试
 
 
 def test():
@@ -1041,11 +1043,25 @@ def sync_inference_model_weights(inference_model, train_model):
         train_model: 训练模型
     """
     print("同步推理模型权重...")
-    with torch.no_grad():
-        for inf_param, train_param in zip(inference_model.parameters(), train_model.parameters()):
-            # 将训练模型的权重复制到推理模型
-            inf_param.data.copy_(train_param.data)
-    print("推理模型权重同步完成")
+    try:
+        with torch.no_grad():
+            for inf_param, train_param in zip(inference_model.parameters(), train_model.parameters()):
+                # 检查权重是否有效
+                if torch.isnan(train_param.data).any() or torch.isinf(train_param.data).any():
+                    print("警告: 训练模型权重包含NaN或Inf，跳过同步")
+                    continue
+                
+                # 将训练模型的权重复制到推理模型
+                inf_param.data.copy_(train_param.data)
+        
+        # 同步后清理缓存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        print("推理模型权重同步完成")
+    except Exception as e:
+        print(f"权重同步失败: {e}")
+        print("继续使用当前推理模型权重")
 
 
 def generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_tokens=100, temperature=0.7, device=None):
@@ -1067,28 +1083,57 @@ def generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_token
     # 设置模型为评估模式
     model.eval()
     
-    for prompt in prompt_strs:
-        # 对提示词进行编码
-        inputs = tokenizer(prompt, return_tensors="pt")
-        # 确保输入在正确的设备上
-        if device is not None:
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-        
-        # 生成文本
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=temperature,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                use_cache=True  # 使用缓存以节省显存
-            )
-        
-        # 解码生成的文本（只取新生成的部分）
-        generated_text = tokenizer.decode(outputs[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-        responses.append(generated_text)
+    # 确保tokenizer有pad_token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    for i, prompt in enumerate(prompt_strs):
+        try:
+            print(f"生成第{i+1}个响应...")
+            
+            # 对提示词进行编码
+            inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            
+            # 确保输入在正确的设备上
+            if device is not None:
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+            
+            # 检查输入是否有效
+            if inputs['input_ids'].numel() == 0:
+                print(f"警告: 第{i+1}个提示词为空，跳过")
+                responses.append("")
+                continue
+            
+            # 生成文本
+            with torch.no_grad():
+                # 使用更保守的生成参数
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=min(max_new_tokens, 512),  # 限制最大长度
+                    do_sample=True,
+                    temperature=max(temperature, 0.1),  # 确保温度不为0
+                    top_p=0.9,  # 添加top_p采样
+                    top_k=50,   # 添加top_k采样
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    use_cache=True,
+                    repetition_penalty=1.1,  # 添加重复惩罚
+                    no_repeat_ngram_size=2,  # 避免重复n-gram
+                    early_stopping=True
+                )
+            
+            # 解码生成的文本（只取新生成的部分）
+            input_length = inputs['input_ids'].shape[1]
+            generated_tokens = outputs[0][input_length:]
+            generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            responses.append(generated_text)
+            
+            print(f"第{i+1}个响应生成完成: {generated_text[:50]}...")
+            
+        except Exception as e:
+            print(f"生成第{i+1}个响应时出错: {e}")
+            # 如果生成失败，返回一个默认响应
+            responses.append("生成失败")
         
         # 清理显存
         if torch.cuda.is_available():
@@ -1131,19 +1176,33 @@ def grpo_train_loop(cfg):
     
     # 加载训练模型到GPU 1
     print(f"加载训练模型到{train_device}...")
-    model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-Math-1.5B",
-        torch_dtype=torch.float16,  # 使用半精度以节省显存
-        device_map="cuda:1"  # 指定使用GPU 1
-    )
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            "Qwen/Qwen2.5-Math-1.5B",
+            torch_dtype=torch.float16,  # 使用半精度以节省显存
+            device_map="cuda:1",  # 指定使用GPU 1
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
+        )
+        print("✓ 训练模型加载成功")
+    except Exception as e:
+        print(f"训练模型加载失败: {e}")
+        raise
     
     # 加载推理模型到GPU 0
     print(f"加载推理模型到{inference_device}...")
-    inference_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-Math-1.5B",
-        torch_dtype=torch.float16,  # 使用半精度以节省显存
-        device_map="cuda:0"  # 指定使用GPU 0
-    )
+    try:
+        inference_model = AutoModelForCausalLM.from_pretrained(
+            "Qwen/Qwen2.5-Math-1.5B",
+            torch_dtype=torch.float16,  # 使用半精度以节省显存
+            device_map="cuda:0",  # 指定使用GPU 0
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
+        )
+        print("✓ 推理模型加载成功")
+    except Exception as e:
+        print(f"推理模型加载失败: {e}")
+        raise
     
     # 确保模型在正确的设备上
     device = next(model.parameters()).device
@@ -1159,6 +1218,9 @@ def grpo_train_loop(cfg):
     
     # 初始同步推理模型权重
     sync_inference_model_weights(inference_model, model)
+    
+    # 设置权重同步频率
+    sync_frequency = 5  # 每5步同步一次权重
     
     for step in range(n_grpo_steps):
         prompt_strs, output_strs = sample_data(train_data_arr,8)
@@ -1191,8 +1253,9 @@ def grpo_train_loop(cfg):
             optimizer.step()
             print('loss',loss)
             
-            # 训练后同步推理模型权重
-            sync_inference_model_weights(inference_model, model)
+            # 根据频率同步推理模型权重
+            if (step + 1) % sync_frequency == 0:
+                sync_inference_model_weights(inference_model, model)
             
             # 训练后清理显存
             if torch.cuda.is_available():
