@@ -31,232 +31,12 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import os
-from vllm import LLM, SamplingParams
-import ray
-from ray.util.placement_group import placement_group
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from torch.multiprocessing.reductions import reduce_tensor
 import gc
 
-# 设置环境变量以解决vLLM的multiprocessing问题
-# 双GPU配置：GPU 0用于训练，GPU 1用于推理
+# 设置环境变量
+# 双GPU配置：GPU 0用于推理，GPU 1用于训练
 os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-
-
-class MyLLM(LLM):
-    """Configure the vLLM worker for Ray placement group execution.
-
-    The constructor sets environment variables that allow multiple vLLM
-    workers to share a single physical GPU and that encode the bundle
-    indices assigned by the placement group.
-
-    Args:
-        *args: Positional arguments forwarded to `vllm.LLM`.
-        bundle_indices (list[int]): Placement-group bundle indices
-            assigned to this worker.
-        **kwargs: Keyword arguments forwarded to `vllm.LLM`.
-    """
-
-    def __init__(self, *args, bundle_indices: list[int], **kwargs):
-        # Prevent Ray from manipulating the top-level CUDA_VISIBLE_DEVICES variable
-        # so that vLLM can its own device placement inside the worker.
-        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        # Each worker uses 0.4 GPU so that two instances fit on the same GPUs.
-        os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
-        print(f"creating LLM with bundle_indices={bundle_indices}")
-        super().__init__(*args, **kwargs)
-
-
-class RayTrainingActor:
-    """Training actor that hosts a Facebook OPT-125M model from Hugging Face.
-
-    The model is loaded onto the first GPU assigned to this actor, and expose
-    the CUDA IPC handles so that colocated vLLM workers can map tensors
-    directly.
-    """
-
-    def __init__(self, model_name="Qwen/Qwen2.5-Math-1.5B"):
-        # Ray sets CUDA_VISIBLE_DEVICES to the GPUs assigned to this actor.
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
-        self.model.to("cuda:0")
-        # Zero out all the parameters.
-        for name, p in self.model.named_parameters():
-            p.data.zero_()
-        torch.cuda.synchronize()
-        # The argument for `get_device_uuid` is the index of the GPU in the
-        # list of visible devices.
-        from vllm.platforms import current_platform
-
-        self.device_uuid = current_platform.get_device_uuid(0)
-
-    def report_device_id(self) -> str:
-        return self.device_uuid
-
-    def get_weight_ipc_handles(self):
-        data = {}
-        for name, p in self.model.named_parameters():
-            # A training actor might hold only a subset of the weights and may
-            # need to gather weights from other actors. For demonstration
-            # purposes, each training actor owns the full weight set.
-            data[name] = reduce_tensor(p.detach())
-        return {self.device_uuid: data}
-
-    def update_weights(self, new_weights):
-        """Update the model weights with new weights from training."""
-        with torch.no_grad():
-            for name, param in self.model.named_parameters():
-                if name in new_weights:
-                    param.data.copy_(new_weights[name])
-        torch.cuda.synchronize()
-
-
-class VLLMParameterUpdater:
-    """A class to manage vLLM parameter updates using Ray and CUDA IPC."""
-    
-    def __init__(self, model_name="Qwen/Qwen2.5-Math-1.5B", num_gpus=2):
-        self.model_name = model_name
-        self.num_gpus = num_gpus
-        self.training_actors = []
-        self.inference_engines = []
-        self.placement_group = None
-        self.initialized = False
-        
-    def initialize_ray(self):
-        """Initialize Ray and create placement groups."""
-        if not ray.is_initialized():
-            ray.init()
-        
-        # Create placement group for co-locating training and inference
-        self.placement_group = placement_group([{"GPU": 1, "CPU": 0}] * self.num_gpus)
-        ray.get(self.placement_group.ready())
-        print(f"placement group has bundles {self.placement_group.bundle_specs}")
-        
-    def create_training_actors(self):
-        """Create training actors on each GPU."""
-        for bundle_index in range(self.num_gpus):
-            training_actor = ray.remote(
-                num_cpus=0,
-                num_gpus=0.4,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=self.placement_group,
-                    placement_group_capture_child_tasks=True,
-                    placement_group_bundle_index=bundle_index,
-                ),
-            )(RayTrainingActor).remote(self.model_name)
-            self.training_actors.append(training_actor)
-            
-        # Get device IDs for verification
-        training_actor_device_ids = []
-        for bundle_index, training_actor in enumerate(self.training_actors):
-            device_id = ray.get(training_actor.report_device_id.remote())
-            print(f"training actor {bundle_index} is on {device_id}")
-            training_actor_device_ids.append(device_id)
-            
-        return training_actor_device_ids
-    
-    def create_inference_engines(self):
-        """Create vLLM inference engines."""
-        # Create inference engines for each pair of GPUs
-        bundle_indices_list = [[0, 1]] if self.num_gpus >= 2 else [[0]]
-        
-        for i, bundle_indices in enumerate(bundle_indices_list):
-            llm = ray.remote(
-                num_cpus=0,
-                num_gpus=0,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=self.placement_group,
-                    placement_group_capture_child_tasks=True,
-                ),
-            )(MyLLM).remote(
-                model=self.model_name,
-                enforce_eager=True,
-                tensor_parallel_size=len(bundle_indices),
-                distributed_executor_backend="ray",
-                gpu_memory_utilization=0.4,
-                bundle_indices=bundle_indices,
-            )
-            self.inference_engines.append(llm)
-            
-        # Get device IDs for verification
-        inference_engine_device_ids = []
-        for i, llm in enumerate(self.inference_engines):
-            inference_engine_device_ids.append(
-                ray.get(llm.collective_rpc.remote("report_device_id", args=tuple()))
-            )
-            print(f"inference engine {i} is on {inference_engine_device_ids[-1]}")
-            
-        return inference_engine_device_ids
-    
-    def initialize(self):
-        """Initialize the entire system."""
-        if self.initialized:
-            return
-            
-        print("Initializing vLLM parameter update system...")
-        self.initialize_ray()
-        training_device_ids = self.create_training_actors()
-        inference_device_ids = self.create_inference_engines()
-        
-        # Verify placement
-        if len(training_device_ids) >= 2 and len(inference_device_ids) >= 1:
-            assert training_device_ids[:2] == inference_device_ids[0], "Training and inference devices don't match"
-        
-        self.initialized = True
-        print("vLLM parameter update system initialized successfully!")
-    
-    def update_parameters(self, new_weights):
-        """Update parameters across all training actors and inference engines."""
-        if not self.initialized:
-            raise RuntimeError("System not initialized. Call initialize() first.")
-        
-        print("Updating parameters across training actors...")
-        
-        # Update training actors
-        for actor in self.training_actors:
-            ray.get(actor.update_weights.remote(new_weights))
-        
-        # Gather IPC handles from training actors
-        print("Gathering IPC handles from training actors...")
-        ipc_handles = {}
-        for actor in self.training_actors:
-            ipc_handles.update(ray.get(actor.get_weight_ipc_handles.remote()))
-        
-        # Update inference engines
-        print("Updating inference engine weights...")
-        for llm in self.inference_engines:
-            ray.get(
-                llm.collective_rpc.remote(
-                    "update_weights_from_ipc_handles", args=(ipc_handles,)
-                )
-            )
-        
-        # Verify weights are updated
-        print("Verifying weight updates...")
-        for llm in self.inference_engines:
-            assert ray.get(llm.collective_rpc.remote("check_weights_changed", args=tuple()))
-        
-        print("Parameter update completed successfully!")
-    
-    def generate_responses(self, prompts, sampling_params):
-        """Generate responses using the inference engines."""
-        if not self.initialized:
-            raise RuntimeError("System not initialized. Call initialize() first.")
-        
-        # Use the first inference engine for generation
-        if self.inference_engines:
-            llm = self.inference_engines[0]
-            outputs = ray.get(llm.generate.remote(prompts, sampling_params))
-            return outputs
-        else:
-            raise RuntimeError("No inference engines available")
-    
-    def cleanup(self):
-        """Clean up Ray resources."""
-        if ray.is_initialized():
-            ray.shutdown()
-        self.initialized = False
 
 
 def test():
@@ -293,22 +73,33 @@ def test():
 from typing import Callable, List
 
 
-def evaluate_vllm(
+def evaluate_model(
     model,
+    tokenizer,
     reward_fn: Callable[[str, str], dict[str, float]],
     prompts: List[str],
-    eval_sampling_params
+    max_new_tokens=100,
+    temperature=0.7
 ) -> None:
     """
     Evaluate a language model on a list of prompts,
     compute evaluation metrics, and serialize results to disk.
     """
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    model.eval()
     for prompt in prompts:
         with torch.no_grad():
             inputs = tokenizer(prompt, return_tensors="pt")
-            response = model.generate(**inputs, **eval_sampling_params)
-            reward = reward_fn(prompt, tokenizer.decode(response[0], skip_special_tokens=True))
+            if torch.cuda.is_available():
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            response = model.generate(
+                **inputs, 
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=temperature,
+                pad_token_id=tokenizer.eos_token_id
+            )
+            generated_text = tokenizer.decode(response[0], skip_special_tokens=True)
+            reward = reward_fn(prompt, generated_text)
             print(reward)
 
 
@@ -1238,200 +1029,23 @@ def test_reward_function():
     print("奖励函数测试完成！")
 
 
-def update_vllm_model_weights(vllm_model, train_model, tokenizer, gpu_memory_utilization=0.5):
+
+
+
+def sync_inference_model_weights(inference_model, train_model):
     """
-    通过重新创建vLLM模型来更新权重（优化显存使用）
+    将训练模型的权重同步到推理模型
     
     Args:
-        vllm_model: 当前的vLLM模型实例
-        train_model: 训练用的PyTorch模型
-        tokenizer: 对应的tokenizer
-        gpu_memory_utilization: vLLM的GPU内存使用率（建议0.5，为训练留出一半显存）
-    
-    Returns:
-        LLM: 更新后的vLLM模型实例
+        inference_model: 推理模型
+        train_model: 训练模型
     """
-    import shutil
-    import os
-    import gc
-    import torch
-    
-    try:
-        print("开始更新vLLM模型权重...")
-        
-        # 清理GPU内存
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-        
-        # 保存训练模型的权重到临时目录
-        temp_model_path = "./temp_model_weights"
-        
-        # 如果目录已存在，先删除
-        if os.path.exists(temp_model_path):
-            shutil.rmtree(temp_model_path)
-        
-        # 保存模型和tokenizer
-        print("保存训练模型权重...")
-        train_model.save_pretrained(temp_model_path)
-        tokenizer.save_pretrained(temp_model_path)
-        
-        # 删除旧的vLLM模型以释放内存
-        print("释放旧vLLM模型内存...")
-        del vllm_model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-        
-        # 创建新的vLLM模型实例（使用GPU 1）
-        print(f"创建新的vLLM模型（使用{gpu_memory_utilization*100}%显存）...")
-        new_vllm_model = LLM(
-            model=temp_model_path,
-            trust_remote_code=True,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=2048,  # 可以使用更长的序列
-            tensor_parallel_size=1,  # 单GPU
-            pipeline_parallel_size=1
-        )
-        
-        print("vLLM模型权重更新完成！")
-        
-        # 清理临时文件（可选，保留用于调试）
-        # shutil.rmtree(temp_model_path)
-        
-        return new_vllm_model
-        
-    except Exception as e:
-        print(f"更新vLLM权重时出错: {e}")
-        print("尝试回退到原始模型...")
-        
-        # 如果更新失败，尝试重新加载原始模型
-        try:
-            new_vllm_model = LLM(
-                model="Qwen/Qwen2.5-Math-1.5B",
-                trust_remote_code=True,
-                gpu_memory_utilization=gpu_memory_utilization,
-                max_model_len=2048,
-                tensor_parallel_size=1,
-                pipeline_parallel_size=1
-            )
-            print("成功回退到原始vLLM模型")
-            return new_vllm_model
-        except Exception as e2:
-            print(f"回退也失败: {e2}")
-            return None
-
-
-def update_vllm_parameters_with_ray(train_model, model_name="Qwen/Qwen2.5-Math-1.5B"):
-    """
-    使用Ray和CUDA IPC更新vLLM参数的简化版本
-    
-    Args:
-        train_model: 训练好的PyTorch模型
-        model_name: 模型名称
-    
-    Returns:
-        VLLMParameterUpdater: 配置好的参数更新器
-    """
-    print("初始化Ray-based vLLM参数更新系统...")
-    
-    # 创建参数更新器
-    updater = VLLMParameterUpdater(model_name=model_name, num_gpus=2)
-    
-    try:
-        # 初始化系统
-        updater.initialize()
-        
-        # 提取训练模型的权重
-        print("提取训练模型权重...")
-        new_weights = {}
-        for name, param in train_model.named_parameters():
-            new_weights[name] = param.data.cpu()  # 移动到CPU以避免设备不匹配
-        
-        # 更新参数
-        print("更新vLLM参数...")
-        updater.update_parameters(new_weights)
-        
-        print("vLLM参数更新完成！")
-        return updater
-        
-    except Exception as e:
-        print(f"Ray-based参数更新失败: {e}")
-        print("回退到传统方法...")
-        updater.cleanup()
-        return None
-
-
-def demonstrate_vllm_parameter_update():
-    """
-    演示如何使用vLLM进行参数更新
-    """
-    print("=== vLLM参数更新演示 ===")
-    
-    # 加载一个简单的模型用于演示
-    print("加载演示模型...")
-    model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B")
-    
-    # 模拟训练过程 - 修改一些参数
-    print("模拟训练过程...")
+    print("同步推理模型权重...")
     with torch.no_grad():
-        for name, param in model.named_parameters():
-            if 'weight' in name:
-                # 添加小的随机扰动来模拟训练更新
-                param.data += torch.randn_like(param.data) * 0.001
-    
-    # 方法1: 使用Ray和CUDA IPC（推荐用于生产环境）
-    print("\n方法1: 使用Ray和CUDA IPC更新参数")
-    try:
-        updater = update_vllm_parameters_with_ray(model)
-        if updater:
-            print("Ray-based参数更新成功！")
-            
-            # 测试生成
-            test_prompts = ["What is 2 + 2?"]
-            sampling_params = SamplingParams(max_tokens=50, temperature=0.7)
-            responses = updater.generate_responses(test_prompts, sampling_params)
-            print(f"生成结果: {responses}")
-            
-            # 清理
-            updater.cleanup()
-        else:
-            print("Ray-based参数更新失败")
-    except Exception as e:
-        print(f"Ray-based方法出错: {e}")
-    
-    # 方法2: 传统方法（保存和重新加载）
-    print("\n方法2: 传统方法（保存和重新加载）")
-    try:
-        # 创建临时vLLM模型
-        vllm_model = LLM(
-            model="Qwen/Qwen2.5-Math-1.5B",
-            trust_remote_code=True,
-            gpu_memory_utilization=0.5,
-            max_model_len=1024,
-            tensor_parallel_size=1
-        )
-        
-        # 更新权重
-        updated_vllm_model = update_vllm_model_weights(vllm_model, model, tokenizer, 0.5)
-        
-        if updated_vllm_model:
-            print("传统方法参数更新成功！")
-            
-            # 测试生成
-            test_prompts = ["What is 3 + 3?"]
-            sampling_params = SamplingParams(max_tokens=50, temperature=0.7)
-            responses = updated_vllm_model.generate(test_prompts, sampling_params)
-            for response in responses:
-                print(f"生成结果: {response.outputs[0].text}")
-        else:
-            print("传统方法参数更新失败")
-            
-    except Exception as e:
-        print(f"传统方法出错: {e}")
-    
-    print("\n=== 演示完成 ===")
+        for inf_param, train_param in zip(inference_model.parameters(), train_model.parameters()):
+            # 将训练模型的权重复制到推理模型
+            inf_param.data.copy_(train_param.data)
+    print("推理模型权重同步完成")
 
 
 def generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_tokens=100, temperature=0.7, device=None):
@@ -1483,38 +1097,7 @@ def generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_token
     return responses
 
 
-def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=100, temperature=0.7):
-    """
-    使用vLLM生成文本响应（优化显存使用）
-    
-    Args:
-        vllm_model: vLLM模型实例
-        prompt_strs: 提示词列表
-        max_new_tokens: 最大生成token数
-        temperature: 采样温度
-    
-    Returns:
-        list[str]: 生成的响应文本列表
-    """
-    # 设置采样参数
-    sampling_params = SamplingParams(
-        max_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=0.9,
-        stop=None
-    )
-    
-    # 批量生成
-    outputs = vllm_model.generate(prompt_strs, sampling_params)
-    
-    # 提取生成的文本
-    responses = []
-    for output in outputs:
-        # 获取生成的文本（去掉输入提示词部分）
-        generated_text = output.outputs[0].text
-        responses.append(generated_text)
-    
-    return responses
+
 
 
 def grpo_train_loop(cfg):
@@ -1529,24 +1112,18 @@ def grpo_train_loop(cfg):
     epochs_per_rollout_batch = cfg['epochs_per_rollout_batch']
     train_batch_size = cfg['train_batch_size']
     gradient_accumulation_steps = cfg['gradient_accumulation_steps']
-    gpu_memory_utilization = cfg['gpu_memory_utilization']
     loss_type = cfg['loss_type']
     use_std_normalization = cfg['use_std_normalization']
-    # 添加vLLM模型更新频率控制
-    vllm_update_frequency = cfg.get('vllm_update_frequency', 1)  # 每N步更新一次vLLM模型
-    # 添加Ray-based vLLM参数更新选项
-    use_ray_vllm = cfg.get('use_ray_vllm', False)  # 是否使用Ray-based vLLM参数更新
     train_data_arr = load_train_data()
     test_data_arr = load_test_data()
     test_prompt_strs, test_output_strs = sample_data(test_data_arr)
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
+    
     # 双GPU配置：GPU 0用于推理，GPU 1用于训练
     train_device = "cuda:1"  # 训练使用GPU 1
     inference_device = "cuda:0"  # 推理使用GPU 0
-    vllm_gpu_memory_utilization = 0.9  # vLLM可以使用更多显存，因为独占GPU 0
     
     print(f"双GPU配置：训练使用{train_device}，推理使用{inference_device}")
-    print(f"vLLM推理使用{vllm_gpu_memory_utilization*100}%显存")
     
     # 检查初始显存状态
     print("初始显存状态:")
@@ -1560,84 +1137,38 @@ def grpo_train_loop(cfg):
         device_map="cuda:1"  # 指定使用GPU 1
     )
     
+    # 加载推理模型到GPU 0
+    print(f"加载推理模型到{inference_device}...")
+    inference_model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-Math-1.5B",
+        torch_dtype=torch.float16,  # 使用半精度以节省显存
+        device_map="cuda:0"  # 指定使用GPU 0
+    )
+    
     # 确保模型在正确的设备上
     device = next(model.parameters()).device
+    inference_device_actual = next(inference_model.parameters()).device
     print(f"训练模型已加载到设备: {device}")
-    
-    # 初始化vLLM推理系统
-    vllm_model = None
-    vllm_updater = None
-    use_vllm = False
-    
-    if use_ray_vllm:
-        print("初始化Ray-based vLLM系统...")
-        try:
-            vllm_updater = VLLMParameterUpdater(model_name="Qwen/Qwen2.5-Math-1.5B", num_gpus=2)
-            vllm_updater.initialize()
-            use_vllm = True
-            print("成功初始化Ray-based vLLM系统")
-        except Exception as e:
-            print(f"Ray-based vLLM初始化失败: {e}")
-            print("回退到传统vLLM方法...")
-            use_ray_vllm = False
-    
-    if not use_ray_vllm:
-        # 加载传统vLLM推理模型到GPU 0
-        print(f"加载传统vLLM推理模型到{inference_device}...")
-        try:
-            # 设置环境变量，只使用GPU 0
-            import os
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-            
-            vllm_model = LLM(
-                model="Qwen/Qwen2.5-Math-1.5B",
-                trust_remote_code=True,
-                gpu_memory_utilization=vllm_gpu_memory_utilization,
-                max_model_len=2048,  # 可以使用更长的序列，因为独占GPU
-                tensor_parallel_size=1,  # 只在GPU 1上运行
-                pipeline_parallel_size=1,
-                dtype="half",  # 使用半精度
-                max_num_batched_tokens=4096,  # 可以使用更多批处理token
-                max_num_seqs=8  # 可以使用更多并发序列
-            )
-            use_vllm = True
-            print("成功加载传统vLLM推理模型")
-        except Exception as e:
-            print(f"传统vLLM加载失败: {e}")
-            print("将使用PyTorch模型进行推理")
-            vllm_model = None
-            use_vllm = False
+    print(f"推理模型已加载到设备: {inference_device_actual}")
     
     # 检查模型加载后的显存状态
     print("模型加载后显存状态:")
     check_gpu_memory()
+    
     optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
+    
+    # 初始同步推理模型权重
+    sync_inference_model_weights(inference_model, model)
+    
     for step in range(n_grpo_steps):
         prompt_strs, output_strs = sample_data(train_data_arr,8)
         res = tokenize_prompt_and_output(prompt_strs,output_strs,tokenizer,device)
         policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']
         old_log_probs = policy_log_probs.detach().clone()
         response_mask = res['response_mask']
-        # 根据vLLM是否可用选择推理方法
-        if use_vllm:
-            if use_ray_vllm and vllm_updater is not None:
-                print("使用Ray-based vLLM进行推理...")
-                sampling_params = SamplingParams(
-                    max_tokens=sampling_max_tokens,
-                    temperature=sampling_temperature,
-                    top_p=0.9
-                )
-                vllm_outputs = vllm_updater.generate_responses(prompt_strs, sampling_params)
-                responses = [output.outputs[0].text for output in vllm_outputs]
-            elif vllm_model is not None:
-                print("使用传统vLLM进行推理...")
-                responses = generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
-            else:
-                print("vLLM不可用，使用PyTorch进行推理...")
-                responses = generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature, device=device)
-        else:
-            print("使用PyTorch进行推理...")
-            responses = generate_model_response_pytorch(model, tokenizer, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature, device=device)
+        # 使用推理模型进行推理
+        print("使用推理模型进行推理...")
+        responses = generate_model_response_pytorch(inference_model, tokenizer, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature, device=inference_device_actual)
         # print('xxxxx responses =========>',responses)
         rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
         for _ in range(epochs_per_rollout_batch):
@@ -1660,52 +1191,19 @@ def grpo_train_loop(cfg):
             optimizer.step()
             print('loss',loss)
             
+            # 训练后同步推理模型权重
+            sync_inference_model_weights(inference_model, model)
+            
             # 训练后清理显存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            
-            # 根据更新频率决定是否更新vLLM模型
-            if use_vllm and (step + 1) % vllm_update_frequency == 0:
-                print(f"步骤 {step}: 更新vLLM模型参数...")
-                
-                if use_ray_vllm and vllm_updater is not None:
-                    # 使用Ray-based参数更新
-                    try:
-                        new_weights = {}
-                        for name, param in model.named_parameters():
-                            new_weights[name] = param.data.cpu()
-                        vllm_updater.update_parameters(new_weights)
-                        print("Ray-based vLLM参数更新成功")
-                    except Exception as e:
-                        print(f"Ray-based vLLM参数更新失败: {e}")
-                        print("切换到PyTorch推理")
-                        use_vllm = False
-                elif vllm_model is not None:
-                    # 使用传统方法更新
-                    new_vllm_model = update_vllm_model_weights(vllm_model, model, tokenizer, vllm_gpu_memory_utilization)
-                    if new_vllm_model is not None:
-                        vllm_model = new_vllm_model
-                        print("传统vLLM参数更新成功")
-                    else:
-                        print("传统vLLM更新失败，切换到PyTorch推理")
-                        use_vllm = False
     
     # 训练结束后清理资源
     print("训练完成，清理资源...")
     
-    # 清理Ray-based vLLM系统
-    if use_ray_vllm and vllm_updater is not None:
-        print("清理Ray-based vLLM系统...")
-        vllm_updater.cleanup()
-    
-    # 清理临时文件
-    import shutil
-    import os
-    temp_model_path = "./temp_model_weights"
-    if os.path.exists(temp_model_path):
-        print("清理临时模型文件...")
-        shutil.rmtree(temp_model_path)
-        print("临时文件清理完成")
+    # 清理GPU内存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     print("资源清理完成")
 
@@ -1722,19 +1220,13 @@ config = {
     'epochs_per_rollout_batch': 1,
     'train_batch_size': 128,  # 双GPU可以支持更大的训练批次
     'gradient_accumulation_steps': 64,  # 恢复梯度累积步数
-    'gpu_memory_utilization': 0.9,  # vLLM推理使用90%显存（独占GPU 1）
     'loss_type': 'reinforce_with_baseline',
     'use_std_normalization': True,
-    'cliprange': 0.2,
-    'vllm_update_frequency': 5,  # 恢复更新频率
-    'use_ray_vllm': True  # 是否使用Ray-based vLLM参数更新（需要Ray和vLLM支持）
+    'cliprange': 0.2
 }
 
 # 取消注释下面的行来测试奖励函数
 # test_reward_function()
-
-# 取消注释下面的行来演示vLLM参数更新
-# demonstrate_vllm_parameter_update()
 
 # 开始训练
 if __name__ == '__main__':
