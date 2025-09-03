@@ -401,14 +401,8 @@ def sft_experiment():
         response_length = len(response)
         correct_response_length = len(response)
         incorrect_response_length = len(response)
-        print('prompt',prompt_strs)
-        print('response',response)
-        print('ground_truth',output_strs)
-        print('reward',reward)
-        print('token_entropy',token_entropy)
-        print('response_length',response_length)
-        print('correct_response_length',correct_response_length)
-        print('incorrect_response_length',incorrect_response_length)
+        # 只打印关键数据
+        print(f'Step {epoch}: loss={loss.item():.6f}, reward={reward:.3f}')
 
     for epoch in range(1000):
         prompt_strs, output_strs = sample_data(train_data_arr,8)
@@ -491,9 +485,8 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
         format_rewards_arr.append(rewards_dict['format_reward'])
         answer_rewards_arr.append(rewards_dict['answer_reward'])
     
-    print('rewards_arr',rewards_arr)
-    print('format_rewards_arr',format_rewards_arr)
-    print('answer_rewards_arr',answer_rewards_arr)
+    # 只打印关键统计信息
+    print(f'Rewards: mean={sum(rewards_arr)/len(rewards_arr):.3f}, std={torch.tensor(rewards_arr).std().item():.3f}')
     if device is not None:
         rewards = torch.tensor(rewards_arr, device=device)
         format_rewards = torch.tensor(format_rewards_arr, device=device)
@@ -962,14 +955,9 @@ def reward_fn(response, truth):
     rewards_dict['format_reward'] = format_reward
     rewards_dict['answer_reward'] = answer_reward
     
-    # 调试信息（可选）
+    # 只在有奖励时打印关键信息
     if total_reward > 0:
-        print(f"Response: {response[:100]}...")
-        print(f"Truth: {truth}")
-        print(f"Extracted response answer: {response_answer}")
-        print(f"Extracted truth answer: {truth_answer}")
-        print(f"Format reward: {format_reward}, Answer reward: {answer_reward}")
-        print("---")
+        print(f"Reward: {total_reward:.3f} (format: {format_reward:.3f}, answer: {answer_reward:.3f})")
     
     return rewards_dict
 
@@ -985,53 +973,48 @@ def check_gpu_memory():
             cached_memory = torch.cuda.memory_reserved(i) / 1024**3  # GB
             free_memory = total_memory - allocated_memory
             
-            print(f"GPU {i}:")
-            print(f"  总显存: {total_memory:.2f} GB")
-            print(f"  已分配: {allocated_memory:.2f} GB ({allocated_memory/total_memory*100:.1f}%)")
-            print(f"  已缓存: {cached_memory:.2f} GB ({cached_memory/total_memory*100:.1f}%)")
-            print(f"  可用: {free_memory:.2f} GB ({free_memory/total_memory*100:.1f}%)")
-            print()
+            print(f"GPU {i}: {allocated_memory:.1f}GB/{total_memory:.1f}GB ({allocated_memory/total_memory*100:.1f}%)")
     else:
-        print("未检测到CUDA设备")
+        print("No CUDA devices found")
 
 
 def test_reward_function():
     """
     测试奖励函数的功能
     """
-    print("测试奖励函数...")
+    print("Testing reward function...")
     
     # 测试用例1: 完美格式和正确答案
     response1 = "Let me solve this step by step. First, I need to calculate... The answer is <answer>72</answer>"
     truth1 = "Natalia sold 48/2 = <<48/2=24>>24 clips in May.\nNatalia sold 48+24 = <<48+24=72>>72 clips altogether in April and May.\n#### 72"
     result1 = reward_fn(response1, truth1)
-    print(f"测试1 - 完美答案: {result1}")
+    print(f"Test 1 (perfect): {result1}")
     
     # 测试用例2: 格式正确但答案错误
     response2 = "The calculation shows that the answer is <answer>100</answer>"
     truth2 = "#### 72"
     result2 = reward_fn(response2, truth2)
-    print(f"测试2 - 格式正确但答案错误: {result2}")
+    print(f"Test 2 (format correct, answer wrong): {result2}")
     
     # 测试用例3: 没有格式标签但答案正确
     response3 = "After calculating, I get 72 as the final answer."
     truth3 = "#### 72"
     result3 = reward_fn(response3, truth3)
-    print(f"测试3 - 无格式标签但答案正确: {result3}")
+    print(f"Test 3 (no format, answer correct): {result3}")
     
     # 测试用例4: 完全错误的响应
     response4 = "I don't know how to solve this problem."
     truth4 = "#### 72"
     result4 = reward_fn(response4, truth4)
-    print(f"测试4 - 完全错误: {result4}")
+    print(f"Test 4 (completely wrong): {result4}")
     
     # 测试用例5: 分数答案
     response5 = "The answer is <answer>1/2</answer>"
     truth5 = "#### 0.5"
     result5 = reward_fn(response5, truth5)
-    print(f"测试5 - 分数答案: {result5}")
+    print(f"Test 5 (fraction): {result5}")
     
-    print("奖励函数测试完成！")
+    print("Reward function test completed!")
 
 
 
@@ -1094,15 +1077,14 @@ def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=100, te
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
-            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             responses.append(generated_text)
         
         return responses
         
     except Exception as e:
-        print(f"vLLM生成失败: {e}")
+        print(f"vLLM generation failed: {e}")
         # 如果vLLM生成失败，返回默认响应
-        return ["生成失败"] * len(prompt_strs)
+        return ["Generation failed"] * len(prompt_strs)
 
 
 
@@ -1134,15 +1116,15 @@ def grpo_train_loop(cfg):
     train_device = "cuda:1"  # 训练使用GPU 1
     inference_device = "cuda:0"  # 推理使用GPU 0
     
-    print(f"双GPU配置：训练使用{train_device}，推理使用{inference_device}")
-    print("推理方式：vLLM")
+    print(f"Training on {train_device}, inference on {inference_device}")
+    print("Using vLLM for inference")
     
     # 检查初始显存状态
-    print("初始显存状态:")
+    print("Initial GPU memory:")
     check_gpu_memory()
     
     # 加载训练模型到GPU 1
-    print(f"加载训练模型到{train_device}...")
+    print(f"Loading training model to {train_device}...")
     try:
         model = AutoModelForCausalLM.from_pretrained(
             "Qwen/Qwen2.5-Math-1.5B",
@@ -1151,41 +1133,40 @@ def grpo_train_loop(cfg):
             trust_remote_code=True,
             low_cpu_mem_usage=True
         )
-        print("✓ 训练模型加载成功")
+        print("✓ Training model loaded successfully")
     except Exception as e:
-        print(f"训练模型加载失败: {e}")
+        print(f"Training model loading failed: {e}")
         raise
     
     # 初始化vLLM推理模型
-    print(f"初始化vLLM推理模型...")
+    print(f"Initializing vLLM inference model...")
     try:
         vllm_model = init_vllm(
             model_id="Qwen/Qwen2.5-Math-1.5B",
             gpu_memory_utilization=0.85
         )
-        print("✓ vLLM推理模型初始化成功")
+        print("✓ vLLM inference model initialized successfully")
     except Exception as e:
-        print(f"vLLM初始化失败: {e}")
+        print(f"vLLM initialization failed: {e}")
         raise
     
     # 确保模型在正确的设备上
     device = next(model.parameters()).device
-    print(f"训练模型已加载到设备: {device}")
-    print(f"vLLM推理模型已初始化")
+    print(f"Training model loaded on device: {device}")
     
     # 检查模型加载后的显存状态
-    print("模型加载后显存状态:")
+    print("GPU memory after model loading:")
     check_gpu_memory()
     
     optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
     
     # 初始同步vLLM推理模型权重
-    print("初始同步vLLM推理模型权重...")
+    print("Initial vLLM weight synchronization...")
     try:
         load_policy_into_vllm_instance(model, vllm_model)
-        print("✓ vLLM推理模型权重同步成功")
+        print("✓ vLLM weights synced successfully")
     except Exception as e:
-        print(f"vLLM权重同步失败: {e}")
+        print(f"vLLM weight sync failed: {e}")
     
     # 设置权重同步频率
     sync_frequency = 5  # 每5步同步一次权重
@@ -1197,9 +1178,7 @@ def grpo_train_loop(cfg):
         old_log_probs = policy_log_probs.detach().clone()
         response_mask = res['response_mask']
         # 使用vLLM进行推理
-        print("使用vLLM进行推理...")
         responses = generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
-        # print('xxxxx responses =========>',responses)
         rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
         for _ in range(epochs_per_rollout_batch):
             # 清理显存
@@ -1212,50 +1191,43 @@ def grpo_train_loop(cfg):
             advantages = rewards_normalized
             cliprange = cfg['cliprange']
 
-            print('policy_log_probs',policy_log_probs.shape)
-            print('rew_rewards',raw_rewards.shape)
-            print('advantages',advantages.shape)
-            print('old_log_probs',old_log_probs.shape)
-            print('cliprange',cliprange)
-            
-            # 添加调试信息
-            print(f'advantages range: [{advantages.min().item():.6f}, {advantages.max().item():.6f}]')
-            print(f'policy_log_probs range: [{policy_log_probs.min().item():.6f}, {policy_log_probs.max().item():.6f}]')
-            print(f'old_log_probs range: [{old_log_probs.min().item():.6f}, {old_log_probs.max().item():.6f}]')
+            # 只打印关键数据
+            print(f'Step {step}: advantages=[{advantages.min().item():.3f}, {advantages.max().item():.3f}], '
+                  f'log_probs=[{policy_log_probs.min().item():.3f}, {policy_log_probs.max().item():.3f}]')
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
             
             # 检查损失值是否为NaN或无穷大
             if torch.isnan(loss) or torch.isinf(loss):
-                print(f"警告: 损失值为 {loss.item()}, 跳过此步骤")
+                print(f"WARNING: Loss is {loss.item()}, skipping step")
                 continue
             
             # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
-            print('loss',loss)
+            print(f'Loss: {loss.item():.6f}')
             
             # 根据频率同步vLLM推理模型权重
             if (step + 1) % sync_frequency == 0:
-                print(f"步骤 {step}: 同步vLLM推理模型权重...")
+                print(f"Syncing vLLM weights at step {step}...")
                 try:
                     load_policy_into_vllm_instance(model, vllm_model)
-                    print("✓ vLLM推理模型权重同步成功")
+                    print("✓ vLLM weights synced successfully")
                 except Exception as e:
-                    print(f"vLLM权重同步失败: {e}")
+                    print(f"vLLM weight sync failed: {e}")
             
             # 训练后清理显存
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
     # 训练结束后清理资源
-    print("训练完成，清理资源...")
+    print("Training completed, cleaning up resources...")
     
     # 清理GPU内存
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     
-    print("资源清理完成")
+    print("Resource cleanup completed")
 
 
 config = {
