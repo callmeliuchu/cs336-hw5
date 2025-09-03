@@ -590,7 +590,9 @@ def compute_grpo_clip_loss(
         cliprange: float,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     ratio = torch.exp(policy_log_probs - old_log_probs)
-    return -torch.min(ratio * advantages,torch.clip(ratio,1-cliprange,1+cliprange) * advantages) , {}
+    clipped_ratio = torch.clamp(ratio, 1-cliprange, 1+cliprange)
+    loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
+    return loss, {}
 
     
 """Problem (compute_policy_gradient_loss): Policy-gradient wrapper (1 point)
@@ -1215,7 +1217,21 @@ def grpo_train_loop(cfg):
             print('advantages',advantages.shape)
             print('old_log_probs',old_log_probs.shape)
             print('cliprange',cliprange)
+            
+            # 添加调试信息
+            print(f'advantages range: [{advantages.min().item():.6f}, {advantages.max().item():.6f}]')
+            print(f'policy_log_probs range: [{policy_log_probs.min().item():.6f}, {policy_log_probs.max().item():.6f}]')
+            print(f'old_log_probs range: [{old_log_probs.min().item():.6f}, {old_log_probs.max().item():.6f}]')
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
+            
+            # 检查损失值是否为NaN或无穷大
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"警告: 损失值为 {loss.item()}, 跳过此步骤")
+                continue
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             print('loss',loss)
             
