@@ -1216,6 +1216,17 @@ def grpo_train_loop(cfg):
                 print(f"  Learning rate: {learning_rate}")
                 break
 
+        # 每隔50步保存模型
+        if (step + 1) % 100 == 0:
+            save_path = f"checkpoint_step_{step + 1}"
+            print(f"Saving model checkpoint at step {step + 1} to {save_path}...")
+            try:
+                model.save_pretrained(save_path)
+                tokenizer.save_pretrained(save_path)
+                print(f"✓ Model checkpoint saved to {save_path}")
+            except Exception as e:
+                print(f"Model checkpoint save failed: {e}")
+            
             # 根据频率同步vLLM推理模型权重
             if (step + 1) % sync_frequency == 0:
                 print(f"Syncing vLLM weights at step {step}...")
