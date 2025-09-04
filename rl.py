@@ -1198,182 +1198,24 @@ def grpo_train_loop(cfg):
                 continue
                 
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
-            
             # 手动更新参数，检查NaN
-            print(f'Loss: {loss.item():.6f}')
-        
-            # 检查optimizer.step()前模型参数是否有NaN
-            print("Checking model parameters before optimizer.step()...")
-            nan_params_before = 0
-            for name, param in model.named_parameters():
-                if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                    nan_params_before += 1
-                    print(f"WARNING: Parameter {name} contains NaN/Inf BEFORE optimizer.step()")
-                    if nan_params_before <= 3:  # 只打印前3个参数避免输出过多
-                        print(f"  Parameter range: [{param.data.min().item():.6f}, {param.data.max().item():.6f}]")
-            
-            if nan_params_before > 0:
-                print(f"WARNING: {nan_params_before} parameters already contain NaN/Inf before optimizer.step()")
-                print("Skipping optimizer.step() due to existing NaN parameters")
-                break
-        
-            # 检查梯度是否有NaN
-            print("Checking gradients before optimizer.step()...")
-            nan_grads = 0
+            print(f'Loss: {loss.item():.6f}','reward:',metadata['raw_rewards'].mean().item())
+            # optimizer.step()
+            ## 手动更新参数
             for name, param in model.named_parameters():
                 if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        nan_grads += 1
-                        print(f"WARNING: Gradient for {name} contains NaN/Inf")
-                        if nan_grads <= 3:  # 只打印前3个梯度避免输出过多
-                            print(f"  Gradient range: [{param.grad.min().item():.6f}, {param.grad.max().item():.6f}]")
-            
-            if nan_grads > 0:
-                print(f"WARNING: {nan_grads} gradients contain NaN/Inf, skipping optimizer.step()")
-                continue
-        
-            # 检查optimizer.step()中可能的除零问题
-            print("Checking optimizer state before step...")
-            for group in optimizer.param_groups:
-                for p in group['params']:
-                    if p in optimizer.state:
-                        state = optimizer.state[p]
-                        if 'exp_avg' in state and 'exp_avg_sq' in state:
-                            exp_avg = state['exp_avg']
-                            exp_avg_sq = state['exp_avg_sq']
-                            step = state.get('step', 0)
-                            
-                            # 检查AdamW的关键值
-                            beta1, beta2 = group['betas']
-                            eps = group['eps']
-                            
-                            # 计算bias correction
-                            bias_correction1 = 1 - beta1 ** step
-                            bias_correction2 = 1 - beta2 ** step
-                            
-                            # 检查是否接近0
-                            if bias_correction1 < 1e-8:
-                                print(f"WARNING: bias_correction1 too small: {bias_correction1:.2e}")
-                            if bias_correction2 < 1e-8:
-                                print(f"WARNING: bias_correction2 too small: {bias_correction2:.2e}")
-                            
-                            # 计算修正后的值
-                            m_hat = exp_avg / max(bias_correction1, 1e-8)
-                            v_hat = exp_avg_sq / max(bias_correction2, 1e-8)
-                            
-                            # 检查sqrt(v_hat) + eps
-                            sqrt_v_hat = torch.sqrt(v_hat)
-                            denominator = sqrt_v_hat + eps
-                            min_denominator = denominator.min().item()
-                            
-                            if min_denominator < 1e-10:
-                                print(f"WARNING: Very small denominator: {min_denominator:.2e}")
-                                print(f"  sqrt(v_hat) min: {sqrt_v_hat.min().item():.2e}")
-                                print(f"  eps: {eps}")
-                            
-                            # 检查更新量
-                            lr = group['lr']
-                            update = lr * m_hat / denominator
-                            
-                            if torch.isnan(update).any() or torch.isinf(update).any():
-                                print(f"WARNING: Update contains NaN/Inf!")
-                                print(f"  Step: {step}, LR: {lr}")
-                                print(f"  exp_avg range: [{exp_avg.min().item():.6f}, {exp_avg.max().item():.6f}]")
-                                print(f"  exp_avg_sq range: [{exp_avg_sq.min().item():.6f}, {exp_avg_sq.max().item():.6f}]")
-                                print(f"  bias_correction1: {bias_correction1:.8f}, bias_correction2: {bias_correction2:.8f}")
-                                print(f"  denominator min: {min_denominator:.2e}")
-                            break
+                    param.data = param.data - learning_rate * param.grad
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+                        print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+                        print(f"  Learning rate: {learning_rate}")
+                        break
+            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+                print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+                print(f"  Learning rate: {learning_rate}")
                 break
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            # 检查optimizer.step()后参数是否变成NaN
-            print("Checking model parameters after optimizer.step()...")
-            nan_params_after = 0
-            for name, param in model.named_parameters():
-                if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                    nan_params_after += 1
-                    print(f"WARNING: Parameter {name} contains NaN/Inf after optimizer.step()")
-                    if nan_params_after <= 3:  # 只打印前3个参数避免输出过多
-                        print(f"  Parameter range: [{param.data.min().item():.6f}, {param.data.max().item():.6f}]")
-            
-            if nan_params_after > 0:
-                print(f"WARNING: {nan_params_after} parameters contain NaN/Inf after optimizer.step()")
-                break
-
-            
-
-            # 手动更新参数
-            # nan_params_found = False
-            # for name, param in model.named_parameters():
-            #     if param.grad is not None:
-            #         # 检查梯度是否包含NaN或Inf
-            #         if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-            #             print(f"WARNING: Gradient for {name} contains NaN/Inf, skipping update")
-            #             continue
-                    
-            #         # 手动更新参数: param = param - lr * grad
-            #         lr = optimizer.param_groups[0]['lr']
-                    
-            #         # 梯度裁剪
-            #         grad_norm = param.grad.norm().item()
-            #         max_grad_norm = 0.1
-            #         if grad_norm > max_grad_norm:
-            #             param.grad = param.grad * (max_grad_norm / grad_norm)
-            #             # print(f"Gradient clipped for {name}: {grad_norm:.6f} -> {max_grad_norm:.6f}")
-                    
-            #         param_update = lr * param.grad
-                    
-            #         # 检查更新量是否包含NaN或Inf
-            #         if torch.isnan(param_update).any() or torch.isinf(param_update).any():
-            #             print(f"WARNING: Parameter update for {name} contains NaN/Inf")
-            #             nan_params_found = True
-            #             continue
-                    
-            #         # 检查更新前的参数
-            #         if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-            #             print(f"WARNING: Parameter {name} already contains NaN/Inf before update")
-            #             nan_params_found = True
-            #             continue
-                    
-            #         # 执行参数更新
-            #         param.data = param.data - param_update
-                   
-            #         # 检查更新后的参数
-            #         if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-            #             print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-            #             print(f"  Update amount: mean={param_update.mean().item():.8f}, std={param_update.std().item():.8f}")
-            #             print(f"  Learning rate: {lr}")
-            #             nan_params_found = True 
-            
-            # if nan_params_found:
-            #     print("WARNING: Found NaN/Inf parameters during manual update, stopping training")
-            #     break
-            
-            # 可选：测试optimizer.step()是否会产生NaN
-            # 注意：这会覆盖手动更新的参数
-            # test_optimizer_step = False  # 设置为True来测试optimizer.step()
-            # if test_optimizer_step:
-            #     print("Testing optimizer.step()...")
-            #     # 重新计算梯度（因为手动更新后梯度可能被清零）
-            #     loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
-                
-            #     # 检查optimizer.step()前后的参数
-            #     param_before_opt = {}
-            #     for name, param in model.named_parameters():
-            #         param_before_opt[name] = param.data.clone()
-                
-            #     optimizer.step()
-                
-            #     # 检查optimizer.step()后是否产生NaN
-            #     for name, param in model.named_parameters():
-            #         if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-            #             print(f"WARNING: Parameter {name} contains NaN/Inf after optimizer.step()")
-            #             print(f"  Before: mean={param_before_opt[name].mean().item():.6f}")
-            #             print(f"  After: mean={param.data.mean().item():.6f}")
-            #             break
-            
             # 根据频率同步vLLM推理模型权重
             if (step + 1) % sync_frequency == 0:
                 print(f"Syncing vLLM weights at step {step}...")
