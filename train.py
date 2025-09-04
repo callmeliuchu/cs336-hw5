@@ -205,9 +205,23 @@ def grpo_train_loop(cfg):
                         break
                 
                 if not has_nan_grad:
-                    optimizer.step()
+                    # 手动更新参数，避免optimizer.step()的NaN问题
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            # 简单的SGD更新: param = param - lr * grad
+                            param.data = param.data - learning_rate * param.grad
+                            
+                            # 检查更新后的参数是否包含NaN
+                            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                                print(f"ERROR: Parameter {name} became NaN/Inf after manual update")
+                                print(f"  Learning rate: {learning_rate}")
+                                print(f"  Gradient stats: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+                                print(f"  Parameter stats before: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
+                                return
+                    
+                    print(f"Manual parameter update completed with lr={learning_rate}")
                 else:
-                    print("Skipping optimizer step due to NaN gradients")
+                    print("Skipping parameter update due to NaN gradients")
 
 
         # 每隔50步保存模型
