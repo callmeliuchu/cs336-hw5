@@ -1202,6 +1202,36 @@ def grpo_train_loop(cfg):
             # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
         
+            # 检查optimizer.step()前模型参数是否有NaN
+            print("Checking model parameters before optimizer.step()...")
+            nan_params_before = 0
+            for name, param in model.named_parameters():
+                if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                    nan_params_before += 1
+                    print(f"WARNING: Parameter {name} contains NaN/Inf BEFORE optimizer.step()")
+                    if nan_params_before <= 3:  # 只打印前3个参数避免输出过多
+                        print(f"  Parameter range: [{param.data.min().item():.6f}, {param.data.max().item():.6f}]")
+            
+            if nan_params_before > 0:
+                print(f"WARNING: {nan_params_before} parameters already contain NaN/Inf before optimizer.step()")
+                print("Skipping optimizer.step() due to existing NaN parameters")
+                break
+        
+            # 检查梯度是否有NaN
+            print("Checking gradients before optimizer.step()...")
+            nan_grads = 0
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        nan_grads += 1
+                        print(f"WARNING: Gradient for {name} contains NaN/Inf")
+                        if nan_grads <= 3:  # 只打印前3个梯度避免输出过多
+                            print(f"  Gradient range: [{param.grad.min().item():.6f}, {param.grad.max().item():.6f}]")
+            
+            if nan_grads > 0:
+                print(f"WARNING: {nan_grads} gradients contain NaN/Inf, skipping optimizer.step()")
+                continue
+        
             # 检查optimizer.step()中可能的除零问题
             print("Checking optimizer state before step...")
             for group in optimizer.param_groups:
@@ -1258,6 +1288,7 @@ def grpo_train_loop(cfg):
             optimizer.step()
             
             # 检查optimizer.step()后参数是否变成NaN
+            print("Checking model parameters after optimizer.step()...")
             nan_params_after = 0
             for name, param in model.named_parameters():
                 if torch.isnan(param.data).any() or torch.isinf(param.data).any():
