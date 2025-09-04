@@ -511,10 +511,10 @@ def compute_group_normalized_rewards(reward_fn,rollout_responses,repeated_ground
     rewards_normalized = torch.clamp(rewards_normalized, -5.0, 5.0)
     print(f"After clipping - advantages range: [{rewards_normalized.min().item():.6f}, {rewards_normalized.max().item():.6f}]")
     
-    rewards_normalized = rewards_normalized.reshape(-1,1) # (rollout_batch_size,)
-    rewards = rewards.reshape(-1,1) # (rollout_batch_size,)
-    format_rewards = format_rewards.reshape(-1,1) # (rollout_batch_size,)
-    answer_rewards = answer_rewards.reshape(-1,1) # (rollout_batch_size,)
+    rewards_normalized = rewards_normalized.reshape(-1) # (rollout_batch_size,)
+    rewards = rewards.reshape(-1) # (rollout_batch_size,)
+    format_rewards = format_rewards.reshape(-1) # (rollout_batch_size,)
+    answer_rewards = answer_rewards.reshape(-1) # (rollout_batch_size,)
     return rewards_normalized, rewards, {
         'rewards_mean': rewards_mean,
         'rewards_std': rewards_std,
@@ -675,6 +675,10 @@ def masked_mean(
     mask: torch.Tensor,
     dim: int | None = None,
     ) -> torch.Tensor:
+    # 确保tensor和mask在同一个设备上
+    if tensor.device != mask.device:
+        mask = mask.to(tensor.device)
+    
     if dim is None:
         masked = tensor * mask
         return masked.sum() / mask.sum()
