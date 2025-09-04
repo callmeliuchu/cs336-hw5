@@ -116,8 +116,8 @@ def grpo_train_loop(cfg):
             
             policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
             optimizer.zero_grad()
-            raw_rewards = metadata['raw_rewards']
-            advantages = rewards_normalized
+            raw_rewards = metadata['raw_rewards'].reshape(-1,1)
+            advantages = rewards_normalized.reshape(-1,1)
             cliprange = cfg['cliprange']
 
             # 只打印关键数据
