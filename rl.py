@@ -1054,10 +1054,3 @@ def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=5000, t
         print(f"vLLM generation failed: {e}")
         # 如果vLLM生成失败，返回默认响应
         return ["Generation failed"] * len(prompt_strs)
-
-
-
-
-
-
-
