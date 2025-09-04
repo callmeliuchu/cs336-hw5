@@ -1199,7 +1199,7 @@ def grpo_train_loop(cfg):
                 
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
             # 手动更新参数，检查NaN
-            print(f'Loss: {loss.item():.6f}','reward:',metadata['raw_rewards'].mean().item())
+            print(f'Loss: {loss.item():.6f}')
             # optimizer.step()
             ## 手动更新参数
             for name, param in model.named_parameters():
