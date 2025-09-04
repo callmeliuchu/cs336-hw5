@@ -67,7 +67,19 @@ def grpo_train_loop(cfg):
     print("GPU memory after model loading:")
     check_gpu_memory()
     
-    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.1,betas=(0.9,0.99))
+    # 手动实现AdamW优化器状态
+    optimizer_state = {}
+    for name, param in model.named_parameters():
+        optimizer_state[name] = {
+            'exp_avg': torch.zeros_like(param.data),  # 一阶矩估计
+            'exp_avg_sq': torch.zeros_like(param.data),  # 二阶矩估计
+            'step': 0
+        }
+    
+    # AdamW参数
+    beta1, beta2 = 0.9, 0.99
+    weight_decay = 0.1
+    eps = 1e-8
     
     # 初始同步vLLM推理模型权重
     print("Initial vLLM weight synchronization...")
@@ -115,7 +127,10 @@ def grpo_train_loop(cfg):
                 torch.cuda.empty_cache()
             
             policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
-            optimizer.zero_grad()
+            # 手动清零梯度
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad.zero_()
             raw_rewards = metadata['raw_rewards'].reshape(-1,1)
             advantages = rewards_normalized.reshape(-1,1)
             cliprange = cfg['cliprange']
@@ -140,21 +155,41 @@ def grpo_train_loop(cfg):
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
             # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
-            # optimizer.step()
-            ## 手动更新参数
+            
+            # 手动实现AdamW优化器步骤
             for name, param in model.named_parameters():
                 if param.grad is not None:
-                    param.data = param.data - learning_rate * param.grad
+                    grad = param.grad
+                    state = optimizer_state[name]
+                    state['step'] += 1
+                    
+                    # 应用权重衰减 (AdamW风格)
+                    param.data.mul_(1 - learning_rate * weight_decay)
+                    
+                    # 更新一阶矩估计 (动量)
+                    state['exp_avg'].mul_(beta1).add_(grad, alpha=1 - beta1)
+                    
+                    # 更新二阶矩估计 (方差)
+                    state['exp_avg_sq'].mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                    
+                    # 偏差修正
+                    bias_correction1 = 1 - beta1 ** state['step']
+                    bias_correction2 = 1 - beta2 ** state['step']
+                    
+                    # 计算更新步长
+                    step_size = learning_rate / bias_correction1
+                    denom = (state['exp_avg_sq'] / bias_correction2).sqrt().add_(eps)
+                    
+                    # 更新参数
+                    param.data.addcdiv_(state['exp_avg'], denom, value=-step_size)
+                    
+                    # 检查NaN/Inf
                     if torch.isnan(param.data).any() or torch.isinf(param.data).any():
                         print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                        print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+                        print(f"  Gradient: mean={grad.mean().item():.8f}, std={grad.std().item():.8f}")
                         print(f"  Learning rate: {learning_rate}")
+                        print(f"  Step: {state['step']}")
                         break
-            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
-                print(f"  Learning rate: {learning_rate}")
-                break
 
         # 每隔50步保存模型
         if (step + 1) % 100 == 0:
