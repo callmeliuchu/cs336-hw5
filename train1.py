@@ -1,23 +1,14 @@
 # from cs336_alignment.vllm_helper import init_vllm, load_policy_into_vllm_instance
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from cs336_alignment.grpo import compute_group_normalized_rewards, grpo_microbatch_train_step
-from cs336_alignment.train_grpo import *
-from cs336_alignment.sft_helper import tokenize_prompt_and_output, get_response_log_probs
-from cs336_alignment.math_baseline import evaluate_vllm
-from cs336_alignment.vllm_helper import *
-from cs336_alignment.sft_helper import tokenize_prompt_and_output, get_response_log_probs
+from cs336_alignment.train_grpo import grpo_microbatch_train_step
+from cs336_alignment.sft_helper import get_response_log_probs
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
-from cs336_alignment.grpo import *
-from cs336_alignment.train_grpo import *
-from cs336_alignment.sft_helper import tokenize_prompt_and_output, get_response_log_probs
-from cs336_alignment.math_baseline import evaluate_vllm
-from cs336_alignment.vllm_helper import *
-from cs336_alignment.sft_helper import tokenize_prompt_and_output, get_response_log_probs
-from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
-from cs336_alignment.grpo import *
-from cs336_alignment.train_grpo import *
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from rl import load_train_data, load_test_data, sample_data, generate_model_response_vllm,init_vllm, load_policy_into_vllm_instance
+
+from rl import load_train_data, load_test_data, sample_data, generate_model_response_vllm,init_vllm, load_policy_into_vllm_instance,tokenize_prompt_and_output
 
 
 def grpo_train_loop(cfg):
@@ -157,21 +148,21 @@ def grpo_train_loop(cfg):
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
             # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
-            # optimizer.step()
+            optimizer.step()
             ## 手动更新参数
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    param.data = param.data - learning_rate * param.grad
-                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                        print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                        print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
-                        print(f"  Learning rate: {learning_rate}")
-                        break
-            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
-                print(f"  Learning rate: {learning_rate}")
-                break
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         param.data = param.data - learning_rate * param.grad
+            #         if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+            #             print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+            #             print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+            #             print(f"  Learning rate: {learning_rate}")
+            #             break
+            # if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+            #     print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+            #     print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+            #     print(f"  Learning rate: {learning_rate}")
+            #     break
 
         # 每隔50步保存模型
         if (step + 1) % 100 == 0:
