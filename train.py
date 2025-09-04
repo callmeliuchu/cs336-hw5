@@ -156,6 +156,7 @@ def grpo_train_loop(cfg):
                     continue
                 
                 # 执行microbatch训练步骤
+                print('start end',start_idx,end_idx)
                 print('policy_log_probs',policy_log_probs.shape)
                 print('microbatch_response_mask',microbatch_response_mask.shape)
                 print('gradient_accumulation_steps',gradient_accumulation_steps)
