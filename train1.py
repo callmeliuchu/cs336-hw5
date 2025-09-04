@@ -1,14 +1,14 @@
-# from cs336_alignment.vllm_helper import init_vllm, load_policy_into_vllm_instance
+from cs336_alignment.vllm_helper import init_vllm, load_policy_into_vllm_instance
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from cs336_alignment.grpo import compute_group_normalized_rewards, grpo_microbatch_train_step
-from cs336_alignment.train_grpo import grpo_microbatch_train_step
+from cs336_alignment.train_grpo import grpo_microbatch_train_step,tokenize_prompt_and_output
 from cs336_alignment.sft_helper import get_response_log_probs
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
-from rl import load_train_data, load_test_data, sample_data, generate_model_response_vllm,init_vllm, load_policy_into_vllm_instance,tokenize_prompt_and_output
+from rl import load_train_data, load_test_data, sample_data,generate_model_response_vllm
 
 
 def grpo_train_loop(cfg):
@@ -89,8 +89,8 @@ def grpo_train_loop(cfg):
     
     for step in range(n_grpo_steps):
         prompt_strs, output_strs = sample_data(train_data_arr,8)
-        res = tokenize_prompt_and_output(prompt_strs,output_strs,tokenizer,device)
-        policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']
+        res = tokenize_prompt_and_output(prompt_strs,output_strs,tokenizer)
+        policy_log_probs = get_response_log_probs(model,res['input_ids'].to(device),res['labels'].to(device),return_token_entropy=True)['log_probs']
         old_log_probs = policy_log_probs.detach().clone()
         response_mask = res['response_mask']
         # 使用vLLM进行推理
@@ -107,7 +107,7 @@ def grpo_train_loop(cfg):
                 print(f"Ground Truth: {output_strs[i]}")
             print("=" * 50)
         
-        rewards_normalized, rewards, metadata = compute_group_normalized_rewards(r1_zero_reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
+        rewards_normalized, rewards, metadata = compute_group_normalized_rewards(r1_zero_reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization)
         
         # 每隔几轮打印奖励统计
         if step % 5 == 0:  # 每5步打印一次
@@ -125,7 +125,7 @@ def grpo_train_loop(cfg):
             policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
             optimizer.zero_grad()
             raw_rewards = metadata['raw_rewards']
-            advantages = rewards_normalized
+            advantages = rewards_normalized.to(device)
             cliprange = cfg['cliprange']
 
             # 只打印关键数据
