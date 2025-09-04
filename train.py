@@ -105,7 +105,7 @@ def grpo_train_loop(cfg):
                 print(f"Ground Truth: {output_strs[i]}")
             print("=" * 50)
         
-        rewards_normalized, rewards, metadata = compute_group_normalized_rewards(r1_zero_reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
+        rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
         
         # 每隔几轮打印奖励统计
         if step % 5 == 0:  # 每5步打印一次
