@@ -5,10 +5,10 @@ from cs336_alignment.train_grpo import grpo_microbatch_train_step, tokenize_prom
 from cs336_alignment.sft_helper import get_response_log_probs
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-import wandb
 import os
 import random
 import argparse
+import time
 
 from rl import load_train_data, load_test_data, sample_data, generate_model_response_vllm
 
@@ -115,32 +115,24 @@ def grpo_train_loop(cfg):
     except Exception as e:
         print(f"vLLM weight sync failed: {e}")
     
-    # Setup wandb logging
+    # Setup output directory
     output_dir = cfg.get('output_dir', './output')
     experiment_name = cfg.get('experiment_name', 'grpo_experiment')
     
-    wandb_log_dir = os.path.join(output_dir, 'wandb')
-    os.makedirs(wandb_log_dir, exist_ok=True)
-    wandb_run = wandb.init(
-        entity="jayshenoy-stanford-university",
-        project="cs336_alignment",
-        config=training_params,
-        name=experiment_name,
-        dir=wandb_log_dir,
-    )
-
     # Directory to store all models
     model_dir = os.path.join(output_dir, 'models')
     os.makedirs(model_dir, exist_ok=True)
 
-    # Setup wandb metrics
-    wandb.define_metric("train_step")
-    wandb.define_metric("eval_step")
-    wandb.define_metric("train/*", step_metric="train_step")
-    wandb.define_metric("eval/*", step_metric="eval_step")
+    # Initialize logging
+    print(f"Starting GRPO training experiment: {experiment_name}")
+    print(f"Training parameters: {training_params}")
+    print(f"Output directory: {output_dir}")
+    print(f"Model directory: {model_dir}")
+    print("=" * 80)
 
     train_step = 0
     eval_step = 0
+    start_time = time.time()
 
     for grpo_step_idx in range(training_params['n_grpo_steps']):
         load_policy_into_vllm_instance(policy, vllm)
@@ -172,18 +164,15 @@ def grpo_train_loop(cfg):
 
             # Print a randomly sampled eval response
             eval_rand_idx = random.randrange(training_params['eval_sample_size'])
-            print('Eval step:', eval_step)
-            print('Prompt:')
-            print(rollout_input_text[eval_rand_idx])
-            print('Correct Answer:')
-            print(answers_batch[eval_rand_idx])
-            print('LLM Response:')
-            print(rollout_response_text[eval_rand_idx])
-
-            wandb_run.log({
-                'eval_step': eval_step,
-                'eval/accuracy': reward_metadata['mean'],
-            })
+            print(f'\n=== EVALUATION STEP {eval_step} ===')
+            print(f'GRPO Step: {grpo_step_idx}')
+            print(f'Evaluation Accuracy: {reward_metadata["mean"]:.4f}')
+            print(f'Reward Metadata: {reward_metadata}')
+            print('\nSample Response:')
+            print(f'Prompt: {rollout_input_text[eval_rand_idx]}')
+            print(f'Correct Answer: {answers_batch[eval_rand_idx]}')
+            print(f'LLM Response: {rollout_response_text[eval_rand_idx]}')
+            print('=' * 50)
 
             # Save model
             curr_model_dir = os.path.join(model_dir, 'eval_step_{}'.format(eval_step))
@@ -221,10 +210,14 @@ def grpo_train_loop(cfg):
                 training_params['use_std_normalization'],
             )
 
-            wandb_run.log({
-                'train_step': train_step,
-                'train/reward_mean': reward_metadata['mean']
-            })
+            # Print training progress
+            if train_step % 10 == 0:  # Print every 10 training steps
+                print(f'\n--- Training Step {train_step} ---')
+                print(f'GRPO Step: {grpo_step_idx}, Rollout Batch: {rollout_batch_idx}')
+                print(f'Reward Mean: {reward_metadata["mean"]:.4f}')
+                print(f'Reward Std: {reward_metadata.get("std", 0):.4f}')
+                print(f'Advantages - Mean: {advantages.mean().item():.4f}, Std: {advantages.std().item():.4f}')
+                print(f'Raw Rewards - Mean: {raw_rewards.mean().item():.4f}, Std: {raw_rewards.std().item():.4f}')
 
             rollout_data_tokenized = tokenize_prompt_and_output(
                 rollout_input_text,
@@ -279,20 +272,30 @@ def grpo_train_loop(cfg):
                 training_params['optimizer'].step()
 
                 rollout_batch_loss /= n_microbatches_per_rollout_batch
-                wandb_run.log({
-                    'train_step': train_step,
-                    'train/loss': loss
-                })
+                
+                # Print loss information
+                if train_step % 5 == 0:  # Print every 5 training steps
+                    print(f'  Loss: {loss.item():.6f}, Avg Batch Loss: {rollout_batch_loss:.6f}')
+                
                 train_step += 1
     
-    wandb_run.finish()
+    # Training completed
+    end_time = time.time()
+    total_time = end_time - start_time
+    
+    print(f'\n=== TRAINING COMPLETED ===')
+    print(f'Total training time: {total_time:.2f} seconds ({total_time/60:.2f} minutes)')
+    print(f'Total GRPO steps: {training_params["n_grpo_steps"]}')
+    print(f'Total training steps: {train_step}')
+    print(f'Total evaluation steps: {eval_step}')
 
     # Save final model
     model_final_dir = os.path.join(model_dir, 'final')
+    print(f'Saving final model to: {model_final_dir}')
     policy.save_pretrained(save_directory=model_final_dir)
     tokenizer.save_pretrained(save_directory=model_final_dir)
     
-    print('Training complete')
+    print('Training complete!')
 
 
 config = {
@@ -313,7 +316,7 @@ config = {
     'eval_log_frequency': 5,
     'eval_sample_size': 64,
     'output_dir': './output',
-    'experiment_name': 'grpo_experiment'
+    'experiment_name': 'grpo_experiment_no_wandb'
 }
 
 # 取消注释下面的行来测试奖励函数
