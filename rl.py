@@ -1034,7 +1034,7 @@ def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=1000, t
         temperature=temperature,
         top_p=1.0,
         max_tokens=max_new_tokens,
-        stop=["\n"]  # 在新行处停止生成
+        stop=["</answer>"]  # 在新行处停止生成
     )
     
     try:
@@ -1127,7 +1127,7 @@ def grpo_train_loop(cfg):
     print("GPU memory after model loading:")
     check_gpu_memory()
     
-    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
+    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.1,betas=(0.9,0.99))
     
     # 初始同步vLLM推理模型权重
     print("Initial vLLM weight synchronization...")
