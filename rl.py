@@ -1284,7 +1284,8 @@ def grpo_train_loop(cfg):
                                 print(f"  denominator min: {min_denominator:.2e}")
                             break
                 break
-        
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             # 检查optimizer.step()后参数是否变成NaN
