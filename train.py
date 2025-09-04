@@ -163,32 +163,87 @@ def grpo_train_loop(cfg):
                     state = optimizer_state[name]
                     state['step'] += 1
                     
+                    # 检查梯度是否包含NaN/Inf
+                    if torch.isnan(grad).any() or torch.isinf(grad).any():
+                        print(f"ERROR: Gradient for {name} contains NaN/Inf before optimization")
+                        print(f"  Gradient stats: mean={grad.mean().item():.8f}, std={grad.std().item():.8f}")
+                        print(f"  Gradient min/max: {grad.min().item():.8f}/{grad.max().item():.8f}")
+                        break
+                    
+                    # 检查参数是否包含NaN/Inf
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        print(f"ERROR: Parameter {name} contains NaN/Inf before optimization")
+                        print(f"  Parameter stats: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
+                        break
+                    
                     # 应用权重衰减 (AdamW风格)
                     param.data.mul_(1 - learning_rate * weight_decay)
+                    
+                    # 检查权重衰减后是否出现NaN/Inf
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        print(f"ERROR: Parameter {name} contains NaN/Inf after weight decay")
+                        print(f"  Weight decay factor: {1 - learning_rate * weight_decay}")
+                        break
                     
                     # 更新一阶矩估计 (动量)
                     state['exp_avg'].mul_(beta1).add_(grad, alpha=1 - beta1)
                     
+                    # 检查动量更新后是否出现NaN/Inf
+                    if torch.isnan(state['exp_avg']).any() or torch.isinf(state['exp_avg']).any():
+                        print(f"ERROR: exp_avg for {name} contains NaN/Inf after momentum update")
+                        print(f"  Beta1: {beta1}, Alpha: {1 - beta1}")
+                        break
+                    
                     # 更新二阶矩估计 (方差)
                     state['exp_avg_sq'].mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                    
+                    # 检查方差更新后是否出现NaN/Inf
+                    if torch.isnan(state['exp_avg_sq']).any() or torch.isinf(state['exp_avg_sq']).any():
+                        print(f"ERROR: exp_avg_sq for {name} contains NaN/Inf after variance update")
+                        print(f"  Beta2: {beta2}, Alpha: {1 - beta2}")
+                        break
                     
                     # 偏差修正
                     bias_correction1 = 1 - beta1 ** state['step']
                     bias_correction2 = 1 - beta2 ** state['step']
                     
+                    # 检查偏差修正因子
+                    if torch.isnan(torch.tensor(bias_correction1)) or torch.isnan(torch.tensor(bias_correction2)):
+                        print(f"ERROR: Bias correction factors are NaN for {name}")
+                        print(f"  bias_correction1: {bias_correction1}, bias_correction2: {bias_correction2}")
+                        print(f"  step: {state['step']}")
+                        break
+                    
                     # 计算更新步长
                     step_size = learning_rate / bias_correction1
                     denom = (state['exp_avg_sq'] / bias_correction2).sqrt().add_(eps)
                     
+                    # 检查分母是否包含NaN/Inf
+                    if torch.isnan(denom).any() or torch.isinf(denom).any():
+                        print(f"ERROR: Denominator contains NaN/Inf for {name}")
+                        print(f"  exp_avg_sq stats: mean={state['exp_avg_sq'].mean().item():.8f}, std={state['exp_avg_sq'].std().item():.8f}")
+                        print(f"  bias_correction2: {bias_correction2}")
+                        print(f"  eps: {eps}")
+                        break
+                    
+                    # 检查step_size是否有效
+                    if torch.isnan(torch.tensor(step_size)) or torch.isinf(torch.tensor(step_size)):
+                        print(f"ERROR: step_size is NaN/Inf for {name}")
+                        print(f"  learning_rate: {learning_rate}, bias_correction1: {bias_correction1}")
+                        break
+                    
                     # 更新参数
                     param.data.addcdiv_(state['exp_avg'], denom, value=-step_size)
                     
-                    # 检查NaN/Inf
+                    # 检查最终参数是否包含NaN/Inf
                     if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                        print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                        print(f"  Gradient: mean={grad.mean().item():.8f}, std={grad.std().item():.8f}")
-                        print(f"  Learning rate: {learning_rate}")
-                        print(f"  Step: {state['step']}")
+                        print(f"ERROR: Parameter {name} contains NaN/Inf after final update")
+                        print(f"  Final update components:")
+                        print(f"    exp_avg: mean={state['exp_avg'].mean().item():.8f}, std={state['exp_avg'].std().item():.8f}")
+                        print(f"    denom: mean={denom.mean().item():.8f}, std={denom.std().item():.8f}")
+                        print(f"    step_size: {step_size}")
+                        print(f"    learning_rate: {learning_rate}")
+                        print(f"    step: {state['step']}")
                         break
 
         # 每隔50步保存模型
