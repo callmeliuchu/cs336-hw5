@@ -154,6 +154,13 @@ def grpo_train_loop(cfg):
                     continue
                 
                 # 执行microbatch训练步骤
+                print('policy_log_probs',policy_log_probs.shape)
+                print('microbatch_response_mask',microbatch_response_mask.shape)
+                print('gradient_accumulation_steps',gradient_accumulation_steps)
+                print('loss_type',loss_type)
+                print('microbatch_raw_rewards',microbatch_raw_rewards.shape)
+                print('microbatch_advantages',microbatch_advantages.shape)
+                print('microbatch_old_log_probs',microbatch_old_log_probs.shape)
                 loss, loss_metadata = grpo_microbatch_train_step(
                     policy_log_probs,
                     microbatch_response_mask,
