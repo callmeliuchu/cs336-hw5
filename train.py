@@ -67,7 +67,7 @@ def grpo_train_loop(cfg):
     print("GPU memory after model loading:")
     check_gpu_memory()
     
-    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.1,betas=(0.9,0.99))
+    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
     
     # 初始同步vLLM推理模型权重
     print("Initial vLLM weight synchronization...")
@@ -138,23 +138,10 @@ def grpo_train_loop(cfg):
                 continue
                 
             loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
-            # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
-            # optimizer.step()
-            ## 手动更新参数
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    param.data = param.data - learning_rate * param.grad
-                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                        print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                        print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
-                        print(f"  Learning rate: {learning_rate}")
-                        break
-            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
-                print(f"  Learning rate: {learning_rate}")
-                break
+            
+            optimizer.step()
+
 
         # 每隔50步保存模型
         if (step + 1) % 100 == 0:
