@@ -67,19 +67,7 @@ def grpo_train_loop(cfg):
     print("GPU memory after model loading:")
     check_gpu_memory()
     
-    # 手动实现AdamW优化器状态
-    optimizer_state = {}
-    for name, param in model.named_parameters():
-        optimizer_state[name] = {
-            'exp_avg': torch.zeros_like(param.data),      # 一阶矩估计
-            'exp_avg_sq': torch.zeros_like(param.data),   # 二阶矩估计
-            'step': 0
-        }
-    
-    # AdamW超参数
-    beta1, beta2 = 0.9, 0.95
-    eps = 1e-8
-    weight_decay = 0.0
+    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.1,betas=(0.9,0.99))
     
     # 初始同步vLLM推理模型权重
     print("Initial vLLM weight synchronization...")
@@ -126,171 +114,47 @@ def grpo_train_loop(cfg):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            # 计算microbatch大小
-            micro_train_batch_size = train_batch_size // gradient_accumulation_steps
-            actual_batch_size = res['input_ids'].shape[0]  # 实际的数据批次大小
-            n_microbatches = actual_batch_size // micro_train_batch_size
-            
-            print(f"Actual batch size: {actual_batch_size}, micro_train_batch_size: {micro_train_batch_size}, n_microbatches: {n_microbatches}")
-            
-            # 清零梯度 (手动实现)
-            for param in model.parameters():
-                if param.grad is not None:
-                    param.grad.zero_()
-            total_loss = 0
-            
-            # 梯度累积循环
-            for microbatch_idx in range(n_microbatches):
-                # 计算当前microbatch的切片
-                start_idx = microbatch_idx * micro_train_batch_size
-                end_idx = min((microbatch_idx + 1) * micro_train_batch_size, actual_batch_size)
-                
-                # 获取microbatch数据
-                microbatch_input_ids = res['input_ids'][start_idx:end_idx]
-                microbatch_labels = res['labels'][start_idx:end_idx]
-                microbatch_response_mask = response_mask[start_idx:end_idx]
-                microbatch_advantages = rewards_normalized[start_idx:end_idx]
-                microbatch_raw_rewards = metadata['raw_rewards'][start_idx:end_idx]
-                microbatch_old_log_probs = old_log_probs[start_idx:end_idx]
-                
-                # 检查microbatch是否为空
-                if microbatch_input_ids.shape[0] == 0:
-                    print(f"WARNING: microbatch {microbatch_idx} is empty, skipping")
-                    continue
-                
-                # 检查microbatch数据是否包含NaN
-                if torch.isnan(microbatch_input_ids).any() or torch.isnan(microbatch_labels).any():
-                    print(f"WARNING: microbatch {microbatch_idx} input data contains NaN")
-                    continue
-                if torch.isnan(microbatch_advantages).any():
-                    print(f"WARNING: microbatch {microbatch_idx} advantages contains NaN")
-                    continue
-                if torch.isnan(microbatch_old_log_probs).any():
-                    print(f"WARNING: microbatch {microbatch_idx} old_log_probs contains NaN")
-                    continue
-                
-                # 计算当前microbatch的log_probs
-                print('microbatch_input_ids',microbatch_input_ids.shape)
-                print('microbatch_labels',microbatch_labels.shape)
-                policy_log_probs = get_response_log_probs(model, microbatch_input_ids, microbatch_labels, return_token_entropy=True)['log_probs']
-                
-                if torch.isnan(policy_log_probs).any():
-                    print(f"WARNING: microbatch {microbatch_idx} policy_log_probs contains NaN")
-                    continue
-                
-                # 执行microbatch训练步骤
-                print('start end',start_idx,end_idx)
-                print('input_ids',res['input_ids'].shape)
-                print('labels',res['labels'].shape)
-                print('response_mask',res['response_mask'].shape)
-                print('policy_log_probs',policy_log_probs.shape)
-                print('microbatch_response_mask',microbatch_response_mask.shape)
-                print('gradient_accumulation_steps',gradient_accumulation_steps)
-                print('loss_type',loss_type)
-                print('microbatch_raw_rewards',microbatch_raw_rewards.shape)
-                print('microbatch_advantages',microbatch_advantages.shape)
-                print('microbatch_old_log_probs',microbatch_old_log_probs.shape)
-                loss, loss_metadata = grpo_microbatch_train_step(
-                    policy_log_probs,
-                    microbatch_response_mask,
-                    gradient_accumulation_steps,
-                    loss_type,
-                    microbatch_raw_rewards.reshape(-1,1),
-                    microbatch_advantages.reshape(-1,1),
-                    microbatch_old_log_probs,
-                    cfg['cliprange']
-                )
-                
-                total_loss += loss.item()
-            
-            # 所有microbatch处理完成后，执行优化器步骤
-            if n_microbatches > 0:
-                avg_loss = total_loss / n_microbatches
-                print(f'Average Loss: {avg_loss:.6f} (over {n_microbatches} microbatches)')
-                
-                # 添加梯度裁剪以防止NaN
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                # 检查梯度是否包含NaN
-                has_nan_grad = False
-                for name, param in model.named_parameters():
-                    if param.grad is not None and torch.isnan(param.grad).any():
-                        print(f"WARNING: Gradient for {name} contains NaN")
-                        has_nan_grad = True
-                        break
-                
-                if not has_nan_grad:
-                    # 手动实现AdamW优化器更新
-                    for name, param in model.named_parameters():
-                        if param.grad is not None:
-                            state = optimizer_state[name]
-                            grad = param.grad
-                            
-                            # 记录更新前的状态
-                            param_before = param.data.clone()
-                            exp_avg_before = state['exp_avg'].clone()
-                            exp_avg_sq_before = state['exp_avg_sq'].clone()
-                            
-                            # 更新步数
-                            state['step'] += 1
-                            step = state['step']
-                            
-                            # 权重衰减
-                            if weight_decay != 0:
-                                param.data.mul_(1 - learning_rate * weight_decay)
-                            
-                            # 更新有偏一阶矩估计
-                            state['exp_avg'].mul_(beta1).add_(grad, alpha=1 - beta1)
-                            
-                            # 更新有偏二阶矩估计
-                            state['exp_avg_sq'].mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-                            
-                            # 计算偏置修正
-                            bias_correction1 = 1 - beta1 ** step
-                            bias_correction2 = 1 - beta2 ** step
-                            
-                            # 计算修正后的矩估计
-                            exp_avg_hat = state['exp_avg'] / bias_correction1
-                            exp_avg_sq_hat = state['exp_avg_sq'] / bias_correction2
-                            
-                            # 计算更新量
-                            denom = exp_avg_sq_hat.sqrt().add_(eps)
-                            update = exp_avg_hat / denom
-                            
-                            # 更新参数
-                            param.data.add_(update, alpha=-learning_rate)
-                            
-                            # 检查每一步是否产生NaN
-                            if torch.isnan(state['exp_avg']).any():
-                                print(f"ERROR: exp_avg became NaN for {name} at step {step}")
-                                print(f"  grad stats: mean={grad.mean().item():.8f}, std={grad.std().item():.8f}")
-                                print(f"  exp_avg before: mean={exp_avg_before.mean().item():.8f}, std={exp_avg_before.std().item():.8f}")
-                                return
-                            
-                            if torch.isnan(state['exp_avg_sq']).any():
-                                print(f"ERROR: exp_avg_sq became NaN for {name} at step {step}")
-                                print(f"  grad stats: mean={grad.mean().item():.8f}, std={grad.std().item():.8f}")
-                                print(f"  exp_avg_sq before: mean={exp_avg_sq_before.mean().item():.8f}, std={exp_avg_sq_before.std().item():.8f}")
-                                return
-                            
-                            if torch.isnan(update).any():
-                                print(f"ERROR: update became NaN for {name} at step {step}")
-                                print(f"  exp_avg_hat stats: mean={exp_avg_hat.mean().item():.8f}, std={exp_avg_hat.std().item():.8f}")
-                                print(f"  exp_avg_sq_hat stats: mean={exp_avg_sq_hat.mean().item():.8f}, std={exp_avg_sq_hat.std().item():.8f}")
-                                print(f"  denom stats: mean={denom.mean().item():.8f}, std={denom.std().item():.8f}")
-                                return
-                            
-                            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                                print(f"ERROR: Parameter {name} became NaN/Inf after AdamW update at step {step}")
-                                print(f"  Learning rate: {learning_rate}")
-                                print(f"  Update stats: mean={update.mean().item():.8f}, std={update.std().item():.8f}")
-                                print(f"  Parameter before: mean={param_before.mean().item():.8f}, std={param_before.std().item():.8f}")
-                                return
-                    
-                    print(f"Manual AdamW update completed with lr={learning_rate}, step={step}")
-                else:
-                    print("Skipping parameter update due to NaN gradients")
+            policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
+            optimizer.zero_grad()
+            raw_rewards = metadata['raw_rewards']
+            advantages = rewards_normalized
+            cliprange = cfg['cliprange']
 
+            # 只打印关键数据
+            # print('advantages: ',advantages)
+            # print('policy_log_probs: ',policy_log_probs)
+            # print(f'Step {step}: advantages=[{advantages.min().item():.3f}, {advantages.max().item():.3f}], '
+            #       f'log_probs=[{policy_log_probs.min().item():.3f}, {policy_log_probs.max().item():.3f}]')
+            
+            # 检查输入数据是否包含NaN
+            if torch.isnan(policy_log_probs).any():
+                print(f"WARNING: policy_log_probs contains NaN before backward")
+                continue
+            if torch.isnan(advantages).any():
+                print(f"WARNING: advantages contains NaN before backward")
+                continue
+            if torch.isnan(old_log_probs).any():
+                print(f"WARNING: old_log_probs contains NaN before backward")
+                continue
+                
+            loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
+            # 手动更新参数，检查NaN
+            print(f'Loss: {loss.item():.6f}')
+            # optimizer.step()
+            ## 手动更新参数
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    param.data = param.data - learning_rate * param.grad
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+                        print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+                        print(f"  Learning rate: {learning_rate}")
+                        break
+            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+                print(f"  Update amount: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
+                print(f"  Learning rate: {learning_rate}")
+                break
 
         # 每隔50步保存模型
         if (step + 1) % 100 == 0:
@@ -328,7 +192,7 @@ def grpo_train_loop(cfg):
 
 config = {
     'n_grpo_steps': 500,
-    'learning_rate': 5e-7,  # 进一步降低学习率以提高稳定性
+    'learning_rate': 1e-6,  # 进一步降低学习率
     'advantage_eps': 1e-6,
     'rollout_batch_size': 128,  # 双GPU可以支持更大的批次
     'group_size': 8,  # 恢复原始组大小
@@ -337,7 +201,7 @@ config = {
     'sampling_max_tokens': 1024,  # 恢复原始生成长度
     'epochs_per_rollout_batch': 1,
     'train_batch_size': 128,  # 双GPU可以支持更大的训练批次
-    'gradient_accumulation_steps': 16,  # 增加梯度累积步数以提高稳定性
+    'gradient_accumulation_steps': 8,  # 降低梯度累积步数
     'loss_type': 'reinforce_with_baseline',
     'use_std_normalization': True,
     'cliprange': 0.2
