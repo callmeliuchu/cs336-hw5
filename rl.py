@@ -1201,55 +1201,75 @@ def grpo_train_loop(cfg):
             
             # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
-            
-            # 检查梯度状态
-            print("Checking gradients before optimizer.step()...")
-            nan_grads = 0
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        nan_grads += 1
-                        print(f"WARNING: Gradient for {name} contains NaN/Inf")
-                        print(f"  Gradient range: [{param.grad.min().item():.6f}, {param.grad.max().item():.6f}]")
-            
-            if nan_grads > 0:
-                print(f"WARNING: {nan_grads} gradients contain NaN/Inf, skipping optimizer.step()")
-                continue
-            
-            # 检查optimizer.step()前后的参数状态
-            print("Checking parameters before optimizer.step()...")
-            nan_params_before = 0
-            for name, param in model.named_parameters():
-                if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                    nan_params_before += 1
-                    print(f"WARNING: Parameter {name} contains NaN/Inf BEFORE optimizer.step()")
-            
-            if nan_params_before > 0:
-                print(f"WARNING: {nan_params_before} parameters already contain NaN/Inf before optimizer.step()")
+        
+            # 检查optimizer.step()中可能的除零问题
+            print("Checking optimizer state before step...")
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    if p in optimizer.state:
+                        state = optimizer.state[p]
+                        if 'exp_avg' in state and 'exp_avg_sq' in state:
+                            exp_avg = state['exp_avg']
+                            exp_avg_sq = state['exp_avg_sq']
+                            step = state.get('step', 0)
+                            
+                            # 检查AdamW的关键值
+                            beta1, beta2 = group['betas']
+                            eps = group['eps']
+                            
+                            # 计算bias correction
+                            bias_correction1 = 1 - beta1 ** step
+                            bias_correction2 = 1 - beta2 ** step
+                            
+                            # 检查是否接近0
+                            if bias_correction1 < 1e-8:
+                                print(f"WARNING: bias_correction1 too small: {bias_correction1:.2e}")
+                            if bias_correction2 < 1e-8:
+                                print(f"WARNING: bias_correction2 too small: {bias_correction2:.2e}")
+                            
+                            # 计算修正后的值
+                            m_hat = exp_avg / max(bias_correction1, 1e-8)
+                            v_hat = exp_avg_sq / max(bias_correction2, 1e-8)
+                            
+                            # 检查sqrt(v_hat) + eps
+                            sqrt_v_hat = torch.sqrt(v_hat)
+                            denominator = sqrt_v_hat + eps
+                            min_denominator = denominator.min().item()
+                            
+                            if min_denominator < 1e-10:
+                                print(f"WARNING: Very small denominator: {min_denominator:.2e}")
+                                print(f"  sqrt(v_hat) min: {sqrt_v_hat.min().item():.2e}")
+                                print(f"  eps: {eps}")
+                            
+                            # 检查更新量
+                            lr = group['lr']
+                            update = lr * m_hat / denominator
+                            
+                            if torch.isnan(update).any() or torch.isinf(update).any():
+                                print(f"WARNING: Update contains NaN/Inf!")
+                                print(f"  Step: {step}, LR: {lr}")
+                                print(f"  exp_avg range: [{exp_avg.min().item():.6f}, {exp_avg.max().item():.6f}]")
+                                print(f"  exp_avg_sq range: [{exp_avg_sq.min().item():.6f}, {exp_avg_sq.max().item():.6f}]")
+                                print(f"  bias_correction1: {bias_correction1:.8f}, bias_correction2: {bias_correction2:.8f}")
+                                print(f"  denominator min: {min_denominator:.2e}")
+                            break
                 break
-            
+        
             optimizer.step()
             
-            print("Checking parameters after optimizer.step()...")
+            # 检查optimizer.step()后参数是否变成NaN
             nan_params_after = 0
             for name, param in model.named_parameters():
                 if torch.isnan(param.data).any() or torch.isinf(param.data).any():
                     nan_params_after += 1
-                    print(f"WARNING: Parameter {name} contains NaN/Inf AFTER optimizer.step()")
+                    print(f"WARNING: Parameter {name} contains NaN/Inf after optimizer.step()")
+                    if nan_params_after <= 3:  # 只打印前3个参数避免输出过多
+                        print(f"  Parameter range: [{param.data.min().item():.6f}, {param.data.max().item():.6f}]")
             
             if nan_params_after > 0:
                 print(f"WARNING: {nan_params_after} parameters contain NaN/Inf after optimizer.step()")
-                print("Checking optimizer state...")
-                for group in optimizer.param_groups:
-                    for p in group['params']:
-                        if p in optimizer.state:
-                            state = optimizer.state[p]
-                            for key, value in state.items():
-                                if isinstance(value, torch.Tensor):
-                                    if torch.isnan(value).any() or torch.isinf(value).any():
-                                        print(f"WARNING: Optimizer state {key} for parameter contains NaN/Inf")
-                                        print(f"  State shape: {value.shape}, range: [{value.min().item():.6f}, {value.max().item():.6f}]")
                 break
+
             
 
             # 手动更新参数
