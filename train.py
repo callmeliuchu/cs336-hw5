@@ -67,7 +67,19 @@ def grpo_train_loop(cfg):
     print("GPU memory after model loading:")
     check_gpu_memory()
     
-    optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate,weight_decay=0.0,betas=(0.9,0.95))
+    # 手动实现AdamW优化器状态
+    optimizer_state = {}
+    for name, param in model.named_parameters():
+        optimizer_state[name] = {
+            'exp_avg': torch.zeros_like(param.data),      # 一阶矩估计
+            'exp_avg_sq': torch.zeros_like(param.data),   # 二阶矩估计
+            'step': 0
+        }
+    
+    # AdamW超参数
+    beta1, beta2 = 0.9, 0.95
+    eps = 1e-8
+    weight_decay = 0.0
     
     # 初始同步vLLM推理模型权重
     print("Initial vLLM weight synchronization...")
@@ -121,7 +133,10 @@ def grpo_train_loop(cfg):
             
             print(f"Actual batch size: {actual_batch_size}, micro_train_batch_size: {micro_train_batch_size}, n_microbatches: {n_microbatches}")
             
-            optimizer.zero_grad()
+            # 清零梯度 (手动实现)
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad.zero_()
             total_loss = 0
             
             # 梯度累积循环
@@ -205,21 +220,74 @@ def grpo_train_loop(cfg):
                         break
                 
                 if not has_nan_grad:
-                    # 手动更新参数，避免optimizer.step()的NaN问题
+                    # 手动实现AdamW优化器更新
                     for name, param in model.named_parameters():
                         if param.grad is not None:
-                            # 简单的SGD更新: param = param - lr * grad
-                            param.data = param.data - learning_rate * param.grad
+                            state = optimizer_state[name]
+                            grad = param.grad
                             
-                            # 检查更新后的参数是否包含NaN
+                            # 记录更新前的状态
+                            param_before = param.data.clone()
+                            exp_avg_before = state['exp_avg'].clone()
+                            exp_avg_sq_before = state['exp_avg_sq'].clone()
+                            
+                            # 更新步数
+                            state['step'] += 1
+                            step = state['step']
+                            
+                            # 权重衰减
+                            if weight_decay != 0:
+                                param.data.mul_(1 - learning_rate * weight_decay)
+                            
+                            # 更新有偏一阶矩估计
+                            state['exp_avg'].mul_(beta1).add_(grad, alpha=1 - beta1)
+                            
+                            # 更新有偏二阶矩估计
+                            state['exp_avg_sq'].mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                            
+                            # 计算偏置修正
+                            bias_correction1 = 1 - beta1 ** step
+                            bias_correction2 = 1 - beta2 ** step
+                            
+                            # 计算修正后的矩估计
+                            exp_avg_hat = state['exp_avg'] / bias_correction1
+                            exp_avg_sq_hat = state['exp_avg_sq'] / bias_correction2
+                            
+                            # 计算更新量
+                            denom = exp_avg_sq_hat.sqrt().add_(eps)
+                            update = exp_avg_hat / denom
+                            
+                            # 更新参数
+                            param.data.add_(update, alpha=-learning_rate)
+                            
+                            # 检查每一步是否产生NaN
+                            if torch.isnan(state['exp_avg']).any():
+                                print(f"ERROR: exp_avg became NaN for {name} at step {step}")
+                                print(f"  grad stats: mean={grad.mean().item():.8f}, std={grad.std().item():.8f}")
+                                print(f"  exp_avg before: mean={exp_avg_before.mean().item():.8f}, std={exp_avg_before.std().item():.8f}")
+                                return
+                            
+                            if torch.isnan(state['exp_avg_sq']).any():
+                                print(f"ERROR: exp_avg_sq became NaN for {name} at step {step}")
+                                print(f"  grad stats: mean={grad.mean().item():.8f}, std={grad.std().item():.8f}")
+                                print(f"  exp_avg_sq before: mean={exp_avg_sq_before.mean().item():.8f}, std={exp_avg_sq_before.std().item():.8f}")
+                                return
+                            
+                            if torch.isnan(update).any():
+                                print(f"ERROR: update became NaN for {name} at step {step}")
+                                print(f"  exp_avg_hat stats: mean={exp_avg_hat.mean().item():.8f}, std={exp_avg_hat.std().item():.8f}")
+                                print(f"  exp_avg_sq_hat stats: mean={exp_avg_sq_hat.mean().item():.8f}, std={exp_avg_sq_hat.std().item():.8f}")
+                                print(f"  denom stats: mean={denom.mean().item():.8f}, std={denom.std().item():.8f}")
+                                return
+                            
                             if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                                print(f"ERROR: Parameter {name} became NaN/Inf after manual update")
+                                print(f"ERROR: Parameter {name} became NaN/Inf after AdamW update at step {step}")
                                 print(f"  Learning rate: {learning_rate}")
-                                print(f"  Gradient stats: mean={param.grad.mean().item():.8f}, std={param.grad.std().item():.8f}")
-                                print(f"  Parameter stats before: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
+                                print(f"  Update stats: mean={update.mean().item():.8f}, std={update.std().item():.8f}")
+                                print(f"  Parameter before: mean={param_before.mean().item():.8f}, std={param_before.std().item():.8f}")
                                 return
                     
-                    print(f"Manual parameter update completed with lr={learning_rate}")
+                    print(f"Manual AdamW update completed with lr={learning_rate}, step={step}")
                 else:
                     print("Skipping parameter update due to NaN gradients")
 
