@@ -147,7 +147,7 @@ def grpo_train_loop(cfg):
                     continue
                 
                 # 计算当前microbatch的log_probs
-                policy_log_probs = get_response_log_probs(model, microbatch_input_ids, microbatch_labels, return_token_entropy=True)['log_probs']
+                policy_log_probs = get_response_log_probs(model, microbatch_input_ids.reshape(-1,1), microbatch_labels.reshape(-1,1), return_token_entropy=True)['log_probs']
                 
                 if torch.isnan(policy_log_probs).any():
                     print(f"WARNING: microbatch {microbatch_idx} policy_log_probs contains NaN")
