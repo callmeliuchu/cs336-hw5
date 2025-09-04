@@ -124,7 +124,7 @@ def grpo_train_loop(cfg):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
+            policy_log_probs = get_response_log_probs(model,res['input_ids'].to(device),res['labels'].to(device),return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
             optimizer.zero_grad()
             raw_rewards = metadata['raw_rewards']
             advantages = rewards_normalized.to(device)
