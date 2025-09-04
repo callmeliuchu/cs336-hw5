@@ -1202,6 +1202,18 @@ def grpo_train_loop(cfg):
             # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
             
+            # 检查优化器状态
+            print("Checking optimizer state...")
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    if p in optimizer.state:
+                        state = optimizer.state[p]
+                        for key, value in state.items():
+                            if isinstance(value, torch.Tensor):
+                                if torch.isnan(value).any() or torch.isinf(value).any():
+                                    print(f"WARNING: Optimizer state {key} for parameter contains NaN/Inf")
+                                    print(f"  State shape: {value.shape}, range: [{value.min().item():.6f}, {value.max().item():.6f}]")
+            
             # 手动更新参数
             nan_params_found = False
             for name, param in model.named_parameters():
@@ -1248,6 +1260,29 @@ def grpo_train_loop(cfg):
             if nan_params_found:
                 print("WARNING: Found NaN/Inf parameters during manual update, stopping training")
                 break
+            
+            # 可选：测试optimizer.step()是否会产生NaN
+            # 注意：这会覆盖手动更新的参数
+            test_optimizer_step = False  # 设置为True来测试optimizer.step()
+            if test_optimizer_step:
+                print("Testing optimizer.step()...")
+                # 重新计算梯度（因为手动更新后梯度可能被清零）
+                loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
+                
+                # 检查optimizer.step()前后的参数
+                param_before_opt = {}
+                for name, param in model.named_parameters():
+                    param_before_opt[name] = param.data.clone()
+                
+                optimizer.step()
+                
+                # 检查optimizer.step()后是否产生NaN
+                for name, param in model.named_parameters():
+                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                        print(f"WARNING: Parameter {name} contains NaN/Inf after optimizer.step()")
+                        print(f"  Before: mean={param_before_opt[name].mean().item():.6f}")
+                        print(f"  After: mean={param.data.mean().item():.6f}")
+                        break
             
             # 根据频率同步vLLM推理模型权重
             if (step + 1) % sync_frequency == 0:
