@@ -60,7 +60,9 @@ def grpo_train_loop(cfg):
     try:
         vllm_model = init_vllm(
             model_id="Qwen/Qwen2.5-Math-1.5B",
-            gpu_memory_utilization=0.85
+            gpu_memory_utilization=0.85,
+            device='cuda:0',
+            seed=42
         )
         print("✓ vLLM inference model initialized successfully")
     except Exception as e:
