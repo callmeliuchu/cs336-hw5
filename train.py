@@ -176,13 +176,22 @@ def grpo_train_loop(cfg):
                         print(f"  Parameter stats: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
                         break
                     
-                    # 应用权重衰减 (AdamW风格)
-                    param.data.mul_(1 - learning_rate * weight_decay)
+                    # 应用权重衰减 (AdamW风格) - 使用更稳定的实现
+                    if name == "model.embed_tokens.weight":  # 专门检查这个参数
+                        print(f"DEBUG: Weight decay for {name}:")
+                        print(f"  learning_rate: {learning_rate}")
+                        print(f"  weight_decay: {weight_decay}")
+                        print(f"  param.data before decay: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
+                    
+                    # 使用更稳定的权重衰减实现
+                    param.data.mul_(1.0 - learning_rate * weight_decay)
                     
                     # 检查权重衰减后是否出现NaN/Inf
                     if torch.isnan(param.data).any() or torch.isinf(param.data).any():
                         print(f"ERROR: Parameter {name} contains NaN/Inf after weight decay")
-                        print(f"  Weight decay factor: {1 - learning_rate * weight_decay}")
+                        print(f"  Weight decay factor: {1.0 - learning_rate * weight_decay}")
+                        print(f"  learning_rate: {learning_rate}")
+                        print(f"  weight_decay: {weight_decay}")
                         break
                     
                     # 更新一阶矩估计 (动量)
@@ -232,18 +241,51 @@ def grpo_train_loop(cfg):
                         print(f"  learning_rate: {learning_rate}, bias_correction1: {bias_correction1}")
                         break
                     
+                    # 更新参数前检查所有组件
+                    if name == "model.embed_tokens.weight":  # 专门检查这个参数
+                        print(f"DEBUG: Before final update for {name}:")
+                        print(f"  param.data: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
+                        print(f"  exp_avg: mean={state['exp_avg'].mean().item():.8f}, std={state['exp_avg'].std().item():.8f}")
+                        print(f"  denom: mean={denom.mean().item():.8f}, std={denom.std().item():.8f}, min={denom.min().item():.8f}")
+                        print(f"  step_size: {step_size}")
+                        print(f"  update_ratio: mean={(-step_size * state['exp_avg'] / denom).mean().item():.8f}")
+                        print(f"  max_update: {(-step_size * state['exp_avg'] / denom).abs().max().item():.8f}")
+                    
+                    # 更新参数前进行数值稳定性检查
+                    update_term = -step_size * state['exp_avg'] / denom
+                    
+                    # 检查更新项是否过大，如果过大则进行裁剪
+                    max_update = update_term.abs().max().item()
+                    if max_update > 1.0:  # 如果更新超过1.0，进行裁剪
+                        print(f"WARNING: Large update detected for {name}, clipping from {max_update:.8f} to 1.0")
+                        update_term = torch.clamp(update_term, -1.0, 1.0)
+                    
                     # 更新参数
-                    param.data.addcdiv_(state['exp_avg'], denom, value=-step_size)
+                    param.data.add_(update_term)
                     
                     # 检查最终参数是否包含NaN/Inf
                     if torch.isnan(param.data).any() or torch.isinf(param.data).any():
                         print(f"ERROR: Parameter {name} contains NaN/Inf after final update")
                         print(f"  Final update components:")
+                        print(f"    param.data before: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
                         print(f"    exp_avg: mean={state['exp_avg'].mean().item():.8f}, std={state['exp_avg'].std().item():.8f}")
+                        print(f"    exp_avg min/max: {state['exp_avg'].min().item():.8f}/{state['exp_avg'].max().item():.8f}")
                         print(f"    denom: mean={denom.mean().item():.8f}, std={denom.std().item():.8f}")
+                        print(f"    denom min/max: {denom.min().item():.8f}/{denom.max().item():.8f}")
                         print(f"    step_size: {step_size}")
                         print(f"    learning_rate: {learning_rate}")
                         print(f"    step: {state['step']}")
+                        print(f"    weight_decay: {weight_decay}")
+                        
+                        # 检查是否是除零或数值溢出问题
+                        update_term = -step_size * state['exp_avg'] / denom
+                        print(f"    update_term stats: mean={update_term.mean().item():.8f}, std={update_term.std().item():.8f}")
+                        print(f"    update_term min/max: {update_term.min().item():.8f}/{update_term.max().item():.8f}")
+                        
+                        # 检查是否有异常大的更新
+                        if update_term.abs().max().item() > 1.0:
+                            print(f"    WARNING: Very large update detected! Max update: {update_term.abs().max().item():.8f}")
+                        
                         break
 
         # 每隔50步保存模型
