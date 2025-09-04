@@ -116,7 +116,10 @@ def grpo_train_loop(cfg):
             
             # 计算microbatch大小
             micro_train_batch_size = train_batch_size // gradient_accumulation_steps
-            n_microbatches = rollout_batch_size // micro_train_batch_size
+            actual_batch_size = res['input_ids'].shape[0]  # 实际的数据批次大小
+            n_microbatches = actual_batch_size // micro_train_batch_size
+            
+            print(f"Actual batch size: {actual_batch_size}, micro_train_batch_size: {micro_train_batch_size}, n_microbatches: {n_microbatches}")
             
             optimizer.zero_grad()
             total_loss = 0
@@ -125,7 +128,7 @@ def grpo_train_loop(cfg):
             for microbatch_idx in range(n_microbatches):
                 # 计算当前microbatch的切片
                 start_idx = microbatch_idx * micro_train_batch_size
-                end_idx = (microbatch_idx + 1) * micro_train_batch_size
+                end_idx = min((microbatch_idx + 1) * micro_train_batch_size, actual_batch_size)
                 
                 # 获取microbatch数据
                 microbatch_input_ids = res['input_ids'][start_idx:end_idx]
@@ -134,6 +137,11 @@ def grpo_train_loop(cfg):
                 microbatch_advantages = rewards_normalized[start_idx:end_idx]
                 microbatch_raw_rewards = metadata['raw_rewards'][start_idx:end_idx]
                 microbatch_old_log_probs = old_log_probs[start_idx:end_idx]
+                
+                # 检查microbatch是否为空
+                if microbatch_input_ids.shape[0] == 0:
+                    print(f"WARNING: microbatch {microbatch_idx} is empty, skipping")
+                    continue
                 
                 # 检查microbatch数据是否包含NaN
                 if torch.isnan(microbatch_input_ids).any() or torch.isnan(microbatch_labels).any():
