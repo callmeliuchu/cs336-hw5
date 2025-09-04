@@ -114,33 +114,79 @@ def grpo_train_loop(cfg):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            policy_log_probs = get_response_log_probs(model,res['input_ids'],res['labels'],return_token_entropy=True)['log_probs']  # 双GPU可以计算entropy
+            # 计算microbatch大小
+            micro_train_batch_size = train_batch_size // gradient_accumulation_steps
+            n_microbatches = rollout_batch_size // micro_train_batch_size
+            
             optimizer.zero_grad()
-            raw_rewards = metadata['raw_rewards']
-            advantages = rewards_normalized
-            cliprange = cfg['cliprange']
-
-            # 只打印关键数据
-            # print('advantages: ',advantages)
-            # print('policy_log_probs: ',policy_log_probs)
-            # print(f'Step {step}: advantages=[{advantages.min().item():.3f}, {advantages.max().item():.3f}], '
-            #       f'log_probs=[{policy_log_probs.min().item():.3f}, {policy_log_probs.max().item():.3f}]')
+            total_loss = 0
             
-            # 检查输入数据是否包含NaN
-            if torch.isnan(policy_log_probs).any():
-                print(f"WARNING: policy_log_probs contains NaN before backward")
-                continue
-            if torch.isnan(advantages).any():
-                print(f"WARNING: advantages contains NaN before backward")
-                continue
-            if torch.isnan(old_log_probs).any():
-                print(f"WARNING: old_log_probs contains NaN before backward")
-                continue
+            # 梯度累积循环
+            for microbatch_idx in range(n_microbatches):
+                # 计算当前microbatch的切片
+                start_idx = microbatch_idx * micro_train_batch_size
+                end_idx = (microbatch_idx + 1) * micro_train_batch_size
                 
-            loss, metadata = grpo_microbatch_train_step(policy_log_probs,response_mask,gradient_accumulation_steps,loss_type,raw_rewards,advantages,old_log_probs,cliprange)
-            print(f'Loss: {loss.item():.6f}')
+                # 获取microbatch数据
+                microbatch_input_ids = res['input_ids'][start_idx:end_idx]
+                microbatch_labels = res['labels'][start_idx:end_idx]
+                microbatch_response_mask = response_mask[start_idx:end_idx]
+                microbatch_advantages = rewards_normalized[start_idx:end_idx]
+                microbatch_raw_rewards = metadata['raw_rewards'][start_idx:end_idx]
+                microbatch_old_log_probs = old_log_probs[start_idx:end_idx]
+                
+                # 检查microbatch数据是否包含NaN
+                if torch.isnan(microbatch_input_ids).any() or torch.isnan(microbatch_labels).any():
+                    print(f"WARNING: microbatch {microbatch_idx} input data contains NaN")
+                    continue
+                if torch.isnan(microbatch_advantages).any():
+                    print(f"WARNING: microbatch {microbatch_idx} advantages contains NaN")
+                    continue
+                if torch.isnan(microbatch_old_log_probs).any():
+                    print(f"WARNING: microbatch {microbatch_idx} old_log_probs contains NaN")
+                    continue
+                
+                # 计算当前microbatch的log_probs
+                policy_log_probs = get_response_log_probs(model, microbatch_input_ids, microbatch_labels, return_token_entropy=True)['log_probs']
+                
+                if torch.isnan(policy_log_probs).any():
+                    print(f"WARNING: microbatch {microbatch_idx} policy_log_probs contains NaN")
+                    continue
+                
+                # 执行microbatch训练步骤
+                loss, loss_metadata = grpo_microbatch_train_step(
+                    policy_log_probs,
+                    microbatch_response_mask,
+                    gradient_accumulation_steps,
+                    loss_type,
+                    microbatch_raw_rewards,
+                    microbatch_advantages,
+                    microbatch_old_log_probs,
+                    cfg['cliprange']
+                )
+                
+                total_loss += loss.item()
             
-            optimizer.step()
+            # 所有microbatch处理完成后，执行优化器步骤
+            if n_microbatches > 0:
+                avg_loss = total_loss / n_microbatches
+                print(f'Average Loss: {avg_loss:.6f} (over {n_microbatches} microbatches)')
+                
+                # 添加梯度裁剪以防止NaN
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                # 检查梯度是否包含NaN
+                has_nan_grad = False
+                for name, param in model.named_parameters():
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        print(f"WARNING: Gradient for {name} contains NaN")
+                        has_nan_grad = True
+                        break
+                
+                if not has_nan_grad:
+                    optimizer.step()
+                else:
+                    print("Skipping optimizer step due to NaN gradients")
 
 
         # 每隔50步保存模型
@@ -179,7 +225,7 @@ def grpo_train_loop(cfg):
 
 config = {
     'n_grpo_steps': 500,
-    'learning_rate': 1e-6,  # 进一步降低学习率
+    'learning_rate': 5e-7,  # 进一步降低学习率以提高稳定性
     'advantage_eps': 1e-6,
     'rollout_batch_size': 128,  # 双GPU可以支持更大的批次
     'group_size': 8,  # 恢复原始组大小
@@ -188,7 +234,7 @@ config = {
     'sampling_max_tokens': 1024,  # 恢复原始生成长度
     'epochs_per_rollout_batch': 1,
     'train_batch_size': 128,  # 双GPU可以支持更大的训练批次
-    'gradient_accumulation_steps': 8,  # 降低梯度累积步数
+    'gradient_accumulation_steps': 16,  # 增加梯度累积步数以提高稳定性
     'loss_type': 'reinforce_with_baseline',
     'use_std_normalization': True,
     'cliprange': 0.2
