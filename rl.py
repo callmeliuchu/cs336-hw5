@@ -1014,7 +1014,7 @@ def load_policy_into_vllm_instance(policy, llm):
 
 
 
-def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=100, temperature=0.7):
+def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=1000, temperature=0.7):
     """
     使用vLLM模型生成文本响应
     
@@ -1202,18 +1202,54 @@ def grpo_train_loop(cfg):
             # 手动更新参数，检查NaN
             print(f'Loss: {loss.item():.6f}')
             
-            # 检查优化器状态
+            # 检查梯度状态
+            print("Checking gradients before optimizer.step()...")
+            nan_grads = 0
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        nan_grads += 1
+                        print(f"WARNING: Gradient for {name} contains NaN/Inf")
+                        print(f"  Gradient range: [{param.grad.min().item():.6f}, {param.grad.max().item():.6f}]")
+            
+            if nan_grads > 0:
+                print(f"WARNING: {nan_grads} gradients contain NaN/Inf, skipping optimizer.step()")
+                continue
+            
+            # 检查optimizer.step()前后的参数状态
+            print("Checking parameters before optimizer.step()...")
+            nan_params_before = 0
+            for name, param in model.named_parameters():
+                if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                    nan_params_before += 1
+                    print(f"WARNING: Parameter {name} contains NaN/Inf BEFORE optimizer.step()")
+            
+            if nan_params_before > 0:
+                print(f"WARNING: {nan_params_before} parameters already contain NaN/Inf before optimizer.step()")
+                break
+            
             optimizer.step()
-            print("Checking optimizer state...")
-            for group in optimizer.param_groups:
-                for p in group['params']:
-                    if p in optimizer.state:
-                        state = optimizer.state[p]
-                        for key, value in state.items():
-                            if isinstance(value, torch.Tensor):
-                                if torch.isnan(value).any() or torch.isinf(value).any():
-                                    print(f"WARNING: Optimizer state {key} for parameter contains NaN/Inf")
-                                    print(f"  State shape: {value.shape}, range: [{value.min().item():.6f}, {value.max().item():.6f}]")
+            
+            print("Checking parameters after optimizer.step()...")
+            nan_params_after = 0
+            for name, param in model.named_parameters():
+                if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                    nan_params_after += 1
+                    print(f"WARNING: Parameter {name} contains NaN/Inf AFTER optimizer.step()")
+            
+            if nan_params_after > 0:
+                print(f"WARNING: {nan_params_after} parameters contain NaN/Inf after optimizer.step()")
+                print("Checking optimizer state...")
+                for group in optimizer.param_groups:
+                    for p in group['params']:
+                        if p in optimizer.state:
+                            state = optimizer.state[p]
+                            for key, value in state.items():
+                                if isinstance(value, torch.Tensor):
+                                    if torch.isnan(value).any() or torch.isinf(value).any():
+                                        print(f"WARNING: Optimizer state {key} for parameter contains NaN/Inf")
+                                        print(f"  State shape: {value.shape}, range: [{value.min().item():.6f}, {value.max().item():.6f}]")
+                break
             
 
             # 手动更新参数
