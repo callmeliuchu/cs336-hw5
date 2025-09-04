@@ -94,7 +94,7 @@ def grpo_train_loop(cfg):
         res = tokenize_prompt_and_output(prompt_strs,output_strs,tokenizer)
         policy_log_probs = get_response_log_probs(model,res['input_ids'].to(device),res['labels'].to(device),return_token_entropy=True)['log_probs']
         old_log_probs = policy_log_probs.detach().clone()
-        response_mask = res['response_mask']
+        response_mask = res['response_mask'].to(device)
         # 使用vLLM进行推理
 
         responses = generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=sampling_max_tokens, temperature=sampling_temperature)
