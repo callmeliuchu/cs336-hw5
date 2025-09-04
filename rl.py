@@ -1214,48 +1214,49 @@ def grpo_train_loop(cfg):
                                     print(f"WARNING: Optimizer state {key} for parameter contains NaN/Inf")
                                     print(f"  State shape: {value.shape}, range: [{value.min().item():.6f}, {value.max().item():.6f}]")
             
+            optimizer.step()
             # 手动更新参数
-            nan_params_found = False
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    # 检查梯度是否包含NaN或Inf
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        print(f"WARNING: Gradient for {name} contains NaN/Inf, skipping update")
-                        continue
+            # nan_params_found = False
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         # 检查梯度是否包含NaN或Inf
+            #         if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+            #             print(f"WARNING: Gradient for {name} contains NaN/Inf, skipping update")
+            #             continue
                     
-                    # 手动更新参数: param = param - lr * grad
-                    lr = optimizer.param_groups[0]['lr']
+            #         # 手动更新参数: param = param - lr * grad
+            #         lr = optimizer.param_groups[0]['lr']
                     
-                    # 梯度裁剪
-                    grad_norm = param.grad.norm().item()
-                    max_grad_norm = 0.1
-                    if grad_norm > max_grad_norm:
-                        param.grad = param.grad * (max_grad_norm / grad_norm)
-                        # print(f"Gradient clipped for {name}: {grad_norm:.6f} -> {max_grad_norm:.6f}")
+            #         # 梯度裁剪
+            #         grad_norm = param.grad.norm().item()
+            #         max_grad_norm = 0.1
+            #         if grad_norm > max_grad_norm:
+            #             param.grad = param.grad * (max_grad_norm / grad_norm)
+            #             # print(f"Gradient clipped for {name}: {grad_norm:.6f} -> {max_grad_norm:.6f}")
                     
-                    param_update = lr * param.grad
+            #         param_update = lr * param.grad
                     
-                    # 检查更新量是否包含NaN或Inf
-                    if torch.isnan(param_update).any() or torch.isinf(param_update).any():
-                        print(f"WARNING: Parameter update for {name} contains NaN/Inf")
-                        nan_params_found = True
-                        continue
+            #         # 检查更新量是否包含NaN或Inf
+            #         if torch.isnan(param_update).any() or torch.isinf(param_update).any():
+            #             print(f"WARNING: Parameter update for {name} contains NaN/Inf")
+            #             nan_params_found = True
+            #             continue
                     
-                    # 检查更新前的参数
-                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                        print(f"WARNING: Parameter {name} already contains NaN/Inf before update")
-                        nan_params_found = True
-                        continue
+            #         # 检查更新前的参数
+            #         if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+            #             print(f"WARNING: Parameter {name} already contains NaN/Inf before update")
+            #             nan_params_found = True
+            #             continue
                     
-                    # 执行参数更新
-                    param.data = param.data - param_update
-                    
-                    # 检查更新后的参数
-                    if torch.isnan(param.data).any() or torch.isinf(param.data).any():
-                        print(f"WARNING: Parameter {name} contains NaN/Inf after update")
-                        print(f"  Update amount: mean={param_update.mean().item():.8f}, std={param_update.std().item():.8f}")
-                        print(f"  Learning rate: {lr}")
-                        nan_params_found = True
+            #         # 执行参数更新
+            #         param.data = param.data - param_update
+                   
+            #         # 检查更新后的参数
+            #         if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+            #             print(f"WARNING: Parameter {name} contains NaN/Inf after update")
+            #             print(f"  Update amount: mean={param_update.mean().item():.8f}, std={param_update.std().item():.8f}")
+            #             print(f"  Learning rate: {lr}")
+            #             nan_params_found = True 
             
             if nan_params_found:
                 print("WARNING: Found NaN/Inf parameters during manual update, stopping training")
