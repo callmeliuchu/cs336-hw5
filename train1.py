@@ -139,9 +139,7 @@ def grpo_train_loop(cfg):
 
         # Evaluation logic
         if grpo_step_idx % training_params['eval_log_frequency'] == (training_params['eval_log_frequency'] - 1):
-            sampled_eval_data = sample_dataset(test_data_arr, training_params['eval_sample_size'])
-            prompts_batch = sampled_eval_data['prompts']
-            answers_batch = sampled_eval_data['answers']
+            prompts_batch, answers_batch = sample_data(test_data_arr, training_params['eval_sample_size'])
 
             vllm_rollouts = vllm.generate(prompts_batch, sampling_params)
 
@@ -184,12 +182,7 @@ def grpo_train_loop(cfg):
         # Training logic - One policy gradient step per train_batch_size of data
         for rollout_batch_idx in range(0, training_params['train_batch_size'], training_params['rollout_batch_size']):
             # Sample a batch of data, then select microbatches later
-            sampled_training_data = sample_dataset(train_data_arr, n_prompts_per_rollout_batch)
-            prompts_batch = sampled_training_data['prompts']
-            answers_batch = sampled_training_data['answers']
-
-            prompts_batch = duplicate_data(prompts_batch, training_params['group_size'])
-            answers_batch = duplicate_data(answers_batch, training_params['group_size'])
+            prompts_batch, answers_batch = sample_data(train_data_arr, n_prompts_per_rollout_batch)
 
             vllm_rollouts = vllm.generate(prompts_batch, sampling_params)
 
