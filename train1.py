@@ -1,4 +1,4 @@
-from cs336_alignment.vllm_helper import init_vllm, load_policy_into_vllm_instance
+# from cs336_alignment.vllm_helper import init_vllm, load_policy_into_vllm_instance
 from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from cs336_alignment.grpo import compute_group_normalized_rewards, grpo_microbatch_train_step
 from cs336_alignment.train_grpo import *
@@ -17,7 +17,7 @@ from cs336_alignment.drgrpo_grader import r1_zero_reward_fn
 from cs336_alignment.grpo import *
 from cs336_alignment.train_grpo import *
 
-from rl import load_train_data, load_test_data, sample_data, generate_model_response_vllm
+from rl import load_train_data, load_test_data, sample_data, generate_model_response_vllm,init_vllm, load_policy_into_vllm_instance
 
 
 def grpo_train_loop(cfg):
