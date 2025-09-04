@@ -13,6 +13,15 @@ import time
 from rl import load_train_data, load_test_data, sample_data, generate_model_response_vllm
 
 
+def print_gpu_memory():
+    """Print GPU memory usage for debugging"""
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            allocated = torch.cuda.memory_allocated(i) / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved(i) / 1024**3   # GB
+            print(f"GPU {i}: Allocated {allocated:.2f}GB, Reserved {reserved:.2f}GB")
+
+
 def grpo_train_loop(cfg):
     # Extract training parameters
     training_params = {
@@ -53,7 +62,7 @@ def grpo_train_loop(cfg):
         "train_batch_size must be greater than or equal to group_size"
     )
     n_microbatches_per_rollout_batch = training_params['rollout_batch_size'] // micro_train_batch_size
-
+    
     # 双GPU配置：GPU 0用于推理，GPU 1用于训练
     train_device = "cuda:1"  # 训练使用GPU 1
     inference_device = "cuda:0"  # 推理使用GPU 0
@@ -128,6 +137,8 @@ def grpo_train_loop(cfg):
     print(f"Training parameters: {training_params}")
     print(f"Output directory: {output_dir}")
     print(f"Model directory: {model_dir}")
+    print("Initial GPU memory status:")
+    print_gpu_memory()
     print("=" * 80)
 
     train_step = 0
@@ -261,6 +272,11 @@ def grpo_train_loop(cfg):
                     )
 
                     rollout_batch_loss += loss.item()
+                    
+                    # Clear intermediate variables to free memory
+                    del policy_log_probs, policy_token_entropy, old_log_probs
+                    del advantages_microbatch, raw_rewards_microbatch
+                    del microbatch_input_ids, microbatch_labels, microbatch_response_mask
             
                 training_params['optimizer'].step()
 
@@ -271,6 +287,10 @@ def grpo_train_loop(cfg):
                     print(f'  Loss: {loss.item():.6f}, Avg Batch Loss: {rollout_batch_loss:.6f}')
                 
                 train_step += 1
+            
+            # Clear GPU memory after each rollout batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     # Training completed
     end_time = time.time()
@@ -295,19 +315,19 @@ config = {
     'n_grpo_steps': 500,
     'learning_rate': 1e-6,  # 进一步降低学习率
     'advantage_eps': 1e-6,
-    'rollout_batch_size': 128,  # 双GPU可以支持更大的批次
-    'group_size': 8,  # 恢复原始组大小
+    'rollout_batch_size': 32,  # 减少批次大小以避免内存不足
+    'group_size': 4,  # 减少组大小
     'sampling_temperature': 1.0,
     'sampling_min_tokens': 4,
-    'sampling_max_tokens': 1024,  # 恢复原始生成长度
+    'sampling_max_tokens': 512,  # 减少生成长度以节省内存
     'epochs_per_rollout_batch': 1,
-    'train_batch_size': 128,  # 双GPU可以支持更大的训练批次
-    'gradient_accumulation_steps': 8,  # 降低梯度累积步数
+    'train_batch_size': 32,  # 减少训练批次大小
+    'gradient_accumulation_steps': 4,  # 减少梯度累积步数
     'loss_type': 'reinforce_with_baseline',
     'use_std_normalization': True,
     'cliprange': 0.2,
     'eval_log_frequency': 5,
-    'eval_sample_size': 64,
+    'eval_sample_size': 32,  # 减少评估样本数量
     'output_dir': './output',
     'experiment_name': 'grpo_experiment_no_wandb'
 }
