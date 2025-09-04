@@ -79,7 +79,7 @@ def grpo_train_loop(cfg):
     # AdamW参数
     beta1, beta2 = 0.9, 0.99
     weight_decay = 0.1
-    eps = 1e-8
+    eps = 1e-6  # 增大eps值，避免除零问题
     
     # 初始同步vLLM推理模型权重
     print("Initial vLLM weight synchronization...")
@@ -225,7 +225,16 @@ def grpo_train_loop(cfg):
                     
                     # 计算更新步长
                     step_size = learning_rate / bias_correction1
-                    denom = (state['exp_avg_sq'] / bias_correction2).sqrt().add_(eps)
+                    
+                    # 更安全的分母计算，避免除零
+                    exp_avg_sq_corrected = state['exp_avg_sq'] / bias_correction2
+                    
+                    # 在第一步时，exp_avg_sq可能全为0，需要特殊处理
+                    if state['step'] == 1:
+                        # 第一步时，使用一个小的初始值避免除零
+                        denom = torch.full_like(exp_avg_sq_corrected, eps)
+                    else:
+                        denom = exp_avg_sq_corrected.sqrt().clamp_(min=eps)  # 确保分母至少为eps
                     
                     # 检查分母是否包含NaN/Inf
                     if torch.isnan(denom).any() or torch.isinf(denom).any():
@@ -246,10 +255,13 @@ def grpo_train_loop(cfg):
                         print(f"DEBUG: Before final update for {name}:")
                         print(f"  param.data: mean={param.data.mean().item():.8f}, std={param.data.std().item():.8f}")
                         print(f"  exp_avg: mean={state['exp_avg'].mean().item():.8f}, std={state['exp_avg'].std().item():.8f}")
+                        print(f"  exp_avg_sq: mean={state['exp_avg_sq'].mean().item():.8f}, std={state['exp_avg_sq'].std().item():.8f}")
+                        print(f"  exp_avg_sq_corrected: mean={exp_avg_sq_corrected.mean().item():.8f}, std={exp_avg_sq_corrected.std().item():.8f}")
                         print(f"  denom: mean={denom.mean().item():.8f}, std={denom.std().item():.8f}, min={denom.min().item():.8f}")
                         print(f"  step_size: {step_size}")
-                        print(f"  update_ratio: mean={(-step_size * state['exp_avg'] / denom).mean().item():.8f}")
-                        print(f"  max_update: {(-step_size * state['exp_avg'] / denom).abs().max().item():.8f}")
+                        print(f"  bias_correction1: {bias_correction1}, bias_correction2: {bias_correction2}")
+                        print(f"  step: {state['step']}")
+                        print(f"  eps: {eps}")
                     
                     # 更新参数前进行数值稳定性检查
                     update_term = -step_size * state['exp_avg'] / denom
