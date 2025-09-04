@@ -168,8 +168,8 @@ def grpo_train_loop(cfg):
                     microbatch_response_mask,
                     gradient_accumulation_steps,
                     loss_type,
-                    microbatch_raw_rewards,
-                    microbatch_advantages,
+                    microbatch_raw_rewards.reshape(-1,1),
+                    microbatch_advantages.reshape(-1,1),
                     microbatch_old_log_probs,
                     cfg['cliprange']
                 )
