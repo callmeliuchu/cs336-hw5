@@ -1014,7 +1014,7 @@ def load_policy_into_vllm_instance(policy, llm):
 
 
 
-def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=1000, temperature=0.7):
+def generate_model_response_vllm(vllm_model, prompt_strs, max_new_tokens=5000, temperature=0.7):
     """
     使用vLLM模型生成文本响应
     
@@ -1152,11 +1152,11 @@ def grpo_train_loop(cfg):
         # 每隔几轮打印responses例子
         if step % 5 == 0:  # 每5步打印一次
             print(f"\n=== Step {step} - Sample Responses ===")
-            for i in range(min(3, len(prompt_strs))):  # 打印前3个例子
+            for i in range(min(1, len(prompt_strs))):  # 打印前3个例子
                 print(f"\nExample {i+1}:")
-                print(f"Prompt: {prompt_strs[i]}...")
-                print(f"Response: {responses[i]}...")
-                print(f"Ground Truth: {output_strs[i]}...")
+                print(f"Prompt: {prompt_strs[i]}")
+                print(f"Response: {responses[i]}")
+                print(f"Ground Truth: {output_strs[i]}")
             print("=" * 50)
         
         rewards_normalized, rewards, metadata = compute_group_normalized_rewards(reward_fn,responses,output_strs,group_size,advantage_eps,use_std_normalization,device)
