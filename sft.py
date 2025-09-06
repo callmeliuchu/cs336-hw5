@@ -132,7 +132,10 @@ def sft_experiment():
         output_strs = [train_answers[i] for i in indices]
         
         res = tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer)
-        policy_log_probs = get_response_log_probs(model, res['input_ids'], res['labels'])['log_probs']
+        # Move input data to the same device as the model
+        input_ids = res['input_ids'].to('cuda:0')
+        labels = res['labels'].to('cuda:0')
+        policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
         response_mask = res['response_mask']
         optimizer.zero_grad()
         loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
