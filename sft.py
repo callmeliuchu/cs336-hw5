@@ -221,7 +221,7 @@ def sft_experiment():
         print(f"  99th percentile: {sequence_lengths[int(len(sequence_lengths)*0.99)]}")
         
         # 建议合适的最大序列长度
-        suggested_max_len = min(2048, sequence_lengths[int(len(sequence_lengths)*0.6)])
+        suggested_max_len = min(2048, sequence_lengths[int(len(sequence_lengths)*0.95)])
         print(f"  Suggested max length: {suggested_max_len}")
     else:
         suggested_max_len = 1024
