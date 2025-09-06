@@ -84,7 +84,7 @@ def eval_sft():
 
     results = evaluate_vllm(llm, r1_zero_reward_fn, prompts, answers, sampling_params)
 
-    with open('qwen_baseline_perf.json', 'w') as f:
+    with open('sft_perf.json', 'w') as f:
         json.dump(results, f, indent=4)
 
 
