@@ -22,15 +22,16 @@ def sft_experiment():
     with open('data/MATH/validation.jsonl', 'r') as f:
         prompt_data = [json.loads(json_line) for json_line in f]
     
-    prompts = []
-    answers = []
-    
+    # Prepare data in the format expected by sample_data
+    data_arr = []
     for p in prompt_data:
         prompt_string = R1_ZERO_PROMPT.format(
             question=p['problem']
         )
-        prompts.append(prompt_string)
-        answers.append(p['answer'])
+        data_arr.append({
+            'question': prompt_string,
+            'answer': p['answer']
+        })
     
 
     model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
@@ -39,7 +40,7 @@ def sft_experiment():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
     for epoch in range(1000):
-        prompt_strs, output_strs = sample_data(prompts, answers)
+        prompt_strs, output_strs = sample_data(data_arr)
         res = tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer)
         policy_log_probs = get_response_log_probs(model, res['input_ids'], res['labels'])['log_probs']
         response_mask = res['response_mask']
