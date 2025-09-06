@@ -182,6 +182,9 @@ def sft_experiment():
         print(f"vLLM initialization failed: {e}")
         raise
     
+    # Load tokenizer first
+    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
+    
     # Load training and validation data
     train_data = load_math_data('data/MATH/train.jsonl')
     val_data = load_math_data('data/MATH/validation.jsonl')
@@ -235,9 +238,6 @@ def sft_experiment():
         )
         val_prompts.append(prompt_string)
         val_answers.append(p['answer'])
-
-
-    tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
     
     # 设置模型为训练模式
     model.train()
