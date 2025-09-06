@@ -286,10 +286,10 @@ def sft_experiment():
     MAX_SEQUENCE_LENGTH = suggested_max_len
     print(f"Using max sequence length: {MAX_SEQUENCE_LENGTH}")
     
-    # 动态批次大小调整
-    current_batch_size = 32
-    max_batch_size = 64  # 最大批次大小
-    min_batch_size = 8   # 最小批次大小
+    # 动态批次大小调整（更保守的设置）
+    current_batch_size = 8  # 从更小的批次开始
+    max_batch_size = 16  # 降低最大批次大小
+    min_batch_size = 2   # 最小批次大小
     
     # 训练统计
     best_loss = float('inf')
@@ -335,15 +335,25 @@ def sft_experiment():
             utilization = (allocated / total_memory) * 100
             print(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB, Total: {total_memory:.2f}GB, Utilization: {utilization:.1f}%")
             
-            # 动态调整批次大小
-            if utilization < 60 and current_batch_size < max_batch_size:
-                current_batch_size = min(max_batch_size, current_batch_size + 4)
+            # 动态调整批次大小（更保守的策略）
+            if utilization < 40 and current_batch_size < max_batch_size:
+                # 只有在显存使用率很低时才增加批次大小，且每次只增加1
+                current_batch_size = min(max_batch_size, current_batch_size + 1)
                 print(f"📈 Increasing batch size to {current_batch_size} (utilization: {utilization:.1f}%)")
-            elif utilization > 85 and current_batch_size > min_batch_size:
-                current_batch_size = max(min_batch_size, current_batch_size - 4)
+            elif utilization > 70 and current_batch_size > min_batch_size:
+                # 显存使用率较高时立即减少批次大小
+                current_batch_size = max(min_batch_size, current_batch_size - 2)
                 print(f"📉 Decreasing batch size to {current_batch_size} (utilization: {utilization:.1f}%)")
         
         try:
+            # 在计算前检查显存，如果使用率过高则跳过
+            if torch.cuda.is_available():
+                current_allocated = torch.cuda.memory_allocated(model_device) / 1024**3
+                current_utilization = (current_allocated / total_memory) * 100
+                if current_utilization > 80:
+                    print(f"⚠️  High memory usage ({current_utilization:.1f}%), skipping this batch")
+                    continue
+            
             policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
             optimizer.zero_grad()
             loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
@@ -367,13 +377,31 @@ def sft_experiment():
                 print(f'Epoch {total_epochs_trained}, Loss: {current_loss:.4f} (Best: {best_loss:.4f} @ Epoch {best_epoch})')
         except torch.cuda.OutOfMemoryError as e:
             print(f"❌ OOM at epoch {epoch}: {e}")
-            print("Skipping this batch and reducing sequence length...")
-            MAX_SEQUENCE_LENGTH = max(512, MAX_SEQUENCE_LENGTH // 2)  # 动态减少序列长度
-            print(f"New max sequence length: {MAX_SEQUENCE_LENGTH}")
+            print("Skipping this batch and reducing parameters...")
+            
+            # 清理显存
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+            
+            # 减少批次大小
+            current_batch_size = max(min_batch_size, current_batch_size // 2)
+            print(f"📉 Reduced batch size to {current_batch_size}")
+            
+            # 减少序列长度
+            MAX_SEQUENCE_LENGTH = max(256, MAX_SEQUENCE_LENGTH // 2)
+            print(f"📏 Reduced max sequence length to {MAX_SEQUENCE_LENGTH}")
+            
             continue
         
         # Clear intermediate variables to free memory
         del input_ids, labels, response_mask, policy_log_probs, loss
+        
+        # 更频繁的显存清理
+        if epoch % 10 == 0:
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
         
         if (epoch+1) % 200 == 0:
             # Save model
