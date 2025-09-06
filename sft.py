@@ -114,7 +114,7 @@ def sft_experiment():
     try:
         vllm_model = init_vllm(
             model_id="Qwen/Qwen2.5-Math-1.5B",
-            gpu_memory_utilization=0.85
+            gpu_memory_utilization=0.7  # Reduce memory usage for vLLM
         )
         print("✓ vLLM inference model initialized successfully")
     except Exception as e:
@@ -153,21 +153,28 @@ def sft_experiment():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
 
     for epoch in range(1000):
+        # Clear GPU cache before each epoch
+        torch.cuda.empty_cache()
+        
         # Randomly sample training prompts and answers (reduce batch size to save memory)
-        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 8))  # Reduce to 8 samples
+        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 4))  # Further reduce to 4 samples
         prompt_strs = [train_prompts[i] for i in indices]
         output_strs = [train_answers[i] for i in indices]
         
-        res = tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer)
-        # Move input data to GPU 1 for training
-        input_ids = res['input_ids'].to('cuda:1')
-        labels = res['labels'].to('cuda:1')
-        response_mask = res['response_mask'].to('cuda:1')
+        model_device = next(model.parameters()).device
+        res = tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer, device=model_device)
+        # Data is already on GPU 1, no need to move
+        input_ids = res['input_ids'].to(model_device)
+        labels = res['labels'].to(model_device)
+        response_mask = res['response_mask'].to(model_device)
         policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
         optimizer.zero_grad()
         loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
         optimizer.step()
         print(f'Epoch {epoch}, Loss: {loss.item()}')
+        
+        # Clear intermediate variables to free memory
+        del input_ids, labels, response_mask, policy_log_probs, loss
         
         if (epoch+1) % 2 == 0:
             # Save model
