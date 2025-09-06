@@ -35,8 +35,6 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model):
         import re
         
         # Set CUDA_VISIBLE_DEVICES to use GPU 1
-        original_cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', None)
-        os.environ['CUDA_VISIBLE_DEVICES'] = '1'
         
         # Initialize VLLM on CUDA 1 with base model
         llm = LLM(
@@ -91,11 +89,7 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model):
         print(f"\nEpoch {epoch} - Validation Accuracy: {accuracy:.4f} ({correct}/{len(eval_prompts)})")
         print("=" * 50)
         
-        # Restore original CUDA_VISIBLE_DEVICES
-        if original_cuda_visible is not None:
-            os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible
-        else:
-            os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+
         
     except ImportError:
         print("VLLM not available, skipping evaluation")
@@ -103,11 +97,7 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model):
         print(f"Evaluation error: {e}")
     finally:
         # Ensure CUDA_VISIBLE_DEVICES is restored even if an error occurs
-        if 'original_cuda_visible' in locals():
-            if original_cuda_visible is not None:
-                os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible
-            else:
-                os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+        pass
 
 def sft_experiment():
     # Load training and validation data
@@ -140,7 +130,7 @@ def sft_experiment():
     model = AutoModelForCausalLM.from_pretrained(
         'Qwen/Qwen2.5-Math-1.5B',
         torch_dtype=torch.float16,  # Use half precision to save memory
-        device_map="cuda:0"
+        device_map="cuda:1"
     )
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
     
