@@ -278,7 +278,6 @@ def sft_experiment():
             policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
             optimizer.zero_grad()
             loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
-            loss.backward()
             optimizer.step()
             print(f'Epoch {epoch}, Loss: {loss.item():.4f}')
         except torch.cuda.OutOfMemoryError as e:
