@@ -34,6 +34,9 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model, llm):
         from vllm import SamplingParams
         import re
         
+        # Set model to evaluation mode
+        policy_model.eval()
+        
         # Load the trained policy parameters into VLLM
         load_policy_into_vllm_instance(policy_model, llm)
         
@@ -85,6 +88,8 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model, llm):
     except Exception as e:
         print(f"Evaluation error: {e}")
     finally:
+        # Set model back to training mode after evaluation
+        policy_model.train()
         # Ensure CUDA_VISIBLE_DEVICES is restored even if an error occurs
         pass
 
@@ -150,6 +155,9 @@ def sft_experiment():
 
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
     
+    # 设置模型为训练模式
+    model.train()
+    
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
 
     for epoch in range(1000):
@@ -157,7 +165,7 @@ def sft_experiment():
         torch.cuda.empty_cache()
         
         # Randomly sample training prompts and answers (reduce batch size to save memory)
-        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 4))  # Further reduce to 4 samples
+        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 16))  # Further reduce to 4 samples
         prompt_strs = [train_prompts[i] for i in indices]
         output_strs = [train_answers[i] for i in indices]
         
@@ -176,7 +184,7 @@ def sft_experiment():
         # Clear intermediate variables to free memory
         del input_ids, labels, response_mask, policy_log_probs, loss
         
-        if (epoch+1) % 2 == 0:
+        if (epoch+1) % 10 == 0:
             # Save model
             model.save_pretrained(f'sft_model')
             tokenizer.save_pretrained(f'sft_model')
@@ -185,6 +193,8 @@ def sft_experiment():
             # Clear GPU cache before evaluation
             torch.cuda.empty_cache()
             
+        
+        if (epoch+1) % 50 == 0:
             # Evaluate on validation set using VLLM
             evaluate_with_vllm(val_prompts, val_answers, epoch, model, vllm_model)
             
