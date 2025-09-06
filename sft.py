@@ -160,7 +160,7 @@ def sft_experiment():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
 
-    for epoch in range(1000):
+    for epoch in range(20000):
         # Clear GPU cache before each epoch
         torch.cuda.empty_cache()
         
@@ -184,7 +184,7 @@ def sft_experiment():
         # Clear intermediate variables to free memory
         del input_ids, labels, response_mask, policy_log_probs, loss
         
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 200 == 0:
             # Save model
             model.save_pretrained(f'sft_model')
             tokenizer.save_pretrained(f'sft_model')
