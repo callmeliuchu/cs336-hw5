@@ -160,7 +160,7 @@ def sft_experiment():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
 
-    for epoch in range(20000):
+    for epoch in range(200000):
         # Clear GPU cache before each epoch
         torch.cuda.empty_cache()
         
@@ -189,12 +189,13 @@ def sft_experiment():
             model.save_pretrained(f'sft_model')
             tokenizer.save_pretrained(f'sft_model')
             print(f'Model saved to sft_model')
-            
+        
+        if (epoch+1) % 10 == 0:
             # Clear GPU cache before evaluation
             torch.cuda.empty_cache()
             
         
-        if (epoch+1) % 50 == 0:
+        if (epoch+1) % 100 == 0:
             # Evaluate on validation set using VLLM
             evaluate_with_vllm(val_prompts, val_answers, epoch, model, vllm_model)
             
