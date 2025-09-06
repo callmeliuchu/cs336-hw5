@@ -20,6 +20,62 @@ from rl import tokenize_prompt_and_output,get_response_log_probs,sft_microbatch_
 
 R1_ZERO_PROMPT = open('cs336_alignment/prompts/r1_zero.prompt', 'r').read()
 
+def tokenize_prompt_and_output_with_limit(prompt_strs, output_strs, tokenizer, device=None, max_length=2048):
+    """Tokenize with sequence length limit and monitoring"""
+    prompt_tokens = tokenizer(prompt_strs, truncation=True, max_length=max_length//2)['input_ids']
+    output_tokens = tokenizer(output_strs, truncation=True, max_length=max_length//2)['input_ids']
+
+    batch_sz = len(prompt_tokens)
+    prompt_and_output_lens = [len(p) + len(o) for p, o in zip(prompt_tokens, output_tokens)]
+    
+    # 监控序列长度
+    max_seq_len = max(prompt_and_output_lens)
+    avg_seq_len = sum(prompt_and_output_lens) / len(prompt_and_output_lens)
+    print(f"Batch sequence lengths - Max: {max_seq_len}, Avg: {avg_seq_len:.1f}")
+    
+    # 如果超过限制，进一步截断
+    if max_seq_len > max_length:
+        print(f"⚠️  Sequence length {max_seq_len} exceeds limit {max_length}, truncating...")
+        # 重新截断到更短的长度
+        prompt_tokens = tokenizer(prompt_strs, truncation=True, max_length=max_length//3)['input_ids']
+        output_tokens = tokenizer(output_strs, truncation=True, max_length=max_length//3)['input_ids']
+        prompt_and_output_lens = [len(p) + len(o) for p, o in zip(prompt_tokens, output_tokens)]
+        max_seq_len = max(prompt_and_output_lens)
+        print(f"After truncation - Max: {max_seq_len}, Avg: {sum(prompt_and_output_lens)/len(prompt_and_output_lens):.1f}")
+    
+    padded_len = max(prompt_and_output_lens)
+
+    # 如果指定了设备，在指定设备上创建tensor
+    if device is not None:
+        input_ids = torch.empty((batch_sz, padded_len - 1), dtype=torch.long, device=device)
+        labels = torch.empty((batch_sz, padded_len - 1), dtype=torch.long, device=device)
+        response_mask = torch.zeros((batch_sz, padded_len - 1), dtype=torch.bool, device=device)
+    else:
+        input_ids = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
+        labels = torch.empty((batch_sz, padded_len - 1), dtype=torch.long)
+        response_mask = torch.zeros((batch_sz, padded_len - 1), dtype=torch.bool)
+
+    for i, (p_toks, o_toks) in enumerate(zip(prompt_tokens, output_tokens)):
+        if device is not None:
+            p_o_concat = torch.tensor(p_toks + o_toks, device=device)
+        else:
+            p_o_concat = torch.tensor(p_toks + o_toks)
+        concat_len = len(p_o_concat)
+        p_o_concat_padded = torch.nn.functional.pad(p_o_concat, (0, padded_len - concat_len), 'constant', tokenizer.eos_token_id)
+
+        input_ids[i] = p_o_concat_padded[:-1]
+        labels[i] = p_o_concat_padded[1:]
+
+        o_start = len(p_toks) - 1
+        o_end = concat_len - 1
+        response_mask[i, o_start:o_end] = True
+    
+    return {
+        'input_ids': input_ids,
+        'labels': labels,
+        'response_mask': response_mask,
+    }
+
 def load_math_data(data_path):
     """Load MATH dataset from jsonl file"""
     data = []
@@ -134,12 +190,40 @@ def sft_experiment():
     train_prompts = []
     train_answers = []
     
-    for p in train_data:
+    print("Preparing training data and analyzing sequence lengths...")
+    sequence_lengths = []
+    
+    for i, p in enumerate(train_data):
         prompt_string = R1_ZERO_PROMPT.format(
             question=p['problem']
         )
         train_prompts.append(prompt_string)
         train_answers.append(p['answer'])
+        
+        # 分析序列长度（只分析前1000个样本以节省时间）
+        if i < 1000:
+            prompt_tokens = tokenizer(prompt_string)['input_ids']
+            answer_tokens = tokenizer(p['answer'])['input_ids']
+            total_length = len(prompt_tokens) + len(answer_tokens)
+            sequence_lengths.append(total_length)
+    
+    # 打印序列长度统计信息
+    if sequence_lengths:
+        sequence_lengths.sort()
+        print(f"Sequence length statistics (first 1000 samples):")
+        print(f"  Min: {min(sequence_lengths)}")
+        print(f"  Max: {max(sequence_lengths)}")
+        print(f"  Mean: {sum(sequence_lengths)/len(sequence_lengths):.1f}")
+        print(f"  Median: {sequence_lengths[len(sequence_lengths)//2]}")
+        print(f"  95th percentile: {sequence_lengths[int(len(sequence_lengths)*0.95)]}")
+        print(f"  99th percentile: {sequence_lengths[int(len(sequence_lengths)*0.99)]}")
+        
+        # 建议合适的最大序列长度
+        suggested_max_len = min(2048, sequence_lengths[int(len(sequence_lengths)*0.95)])
+        print(f"  Suggested max length: {suggested_max_len}")
+    else:
+        suggested_max_len = 1024
+        print(f"Using default max length: {suggested_max_len}")
     
     # Prepare validation prompts and answers
     val_prompts = []
@@ -160,26 +244,50 @@ def sft_experiment():
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
 
+    # 设置最大序列长度限制（基于数据分析结果）
+    MAX_SEQUENCE_LENGTH = suggested_max_len
+    print(f"Using max sequence length: {MAX_SEQUENCE_LENGTH}")
+    
     for epoch in range(200000):
         # Clear GPU cache before each epoch
         torch.cuda.empty_cache()
         
         # Randomly sample training prompts and answers (reduce batch size to save memory)
-        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 4))  # Further reduce to 4 samples
+        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 4))  # 进一步减少到2个样本
         prompt_strs = [train_prompts[i] for i in indices]
         output_strs = [train_answers[i] for i in indices]
         
         model_device = next(model.parameters()).device
-        res = tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer, device=model_device)
-        # Data is already on GPU 1, no need to move
-        input_ids = res['input_ids'].to(model_device)
-        labels = res['labels'].to(model_device)
-        response_mask = res['response_mask'].to(model_device)
-        policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
-        optimizer.zero_grad()
-        loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
-        optimizer.step()
-        print(f'Epoch {epoch}, Loss: {loss.item()}')
+        
+        # 使用带序列长度限制的tokenize函数
+        res = tokenize_prompt_and_output_with_limit(
+            prompt_strs, output_strs, tokenizer, 
+            device=model_device, max_length=MAX_SEQUENCE_LENGTH
+        )
+        
+        input_ids = res['input_ids']
+        labels = res['labels']
+        response_mask = res['response_mask']
+        
+        # 检查显存使用情况
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated(model_device) / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved(model_device) / 1024**3   # GB
+            print(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+        
+        try:
+            policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
+            optimizer.zero_grad()
+            loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
+            loss.backward()
+            optimizer.step()
+            print(f'Epoch {epoch}, Loss: {loss.item():.4f}')
+        except torch.cuda.OutOfMemoryError as e:
+            print(f"❌ OOM at epoch {epoch}: {e}")
+            print("Skipping this batch and reducing sequence length...")
+            MAX_SEQUENCE_LENGTH = max(512, MAX_SEQUENCE_LENGTH // 2)  # 动态减少序列长度
+            print(f"New max sequence length: {MAX_SEQUENCE_LENGTH}")
+            continue
         
         # Clear intermediate variables to free memory
         del input_ids, labels, response_mask, policy_log_probs, loss
