@@ -204,11 +204,10 @@ def sft_experiment():
         train_answers.append(p['answer'])
         
         # 分析序列长度（只分析前1000个样本以节省时间）
-        if i < 1000:
-            prompt_tokens = tokenizer(prompt_string)['input_ids']
-            answer_tokens = tokenizer(p['answer'])['input_ids']
-            total_length = len(prompt_tokens) + len(answer_tokens)
-            sequence_lengths.append(total_length)
+        prompt_tokens = tokenizer(prompt_string)['input_ids']
+        answer_tokens = tokenizer(p['answer'])['input_ids']
+        total_length = len(prompt_tokens) + len(answer_tokens)
+        sequence_lengths.append(total_length)
     
     # 打印序列长度统计信息
     if sequence_lengths:
@@ -222,7 +221,7 @@ def sft_experiment():
         print(f"  99th percentile: {sequence_lengths[int(len(sequence_lengths)*0.99)]}")
         
         # 建议合适的最大序列长度
-        suggested_max_len = min(2048, sequence_lengths[int(len(sequence_lengths)*0.95)])
+        suggested_max_len = min(2048, sequence_lengths[int(len(sequence_lengths)*0.6)])
         print(f"  Suggested max length: {suggested_max_len}")
     else:
         suggested_max_len = 1024
