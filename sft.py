@@ -252,7 +252,7 @@ def sft_experiment():
         torch.cuda.empty_cache()
         
         # Randomly sample training prompts and answers (reduce batch size to save memory)
-        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 8))  # 进一步减少到2个样本
+        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 16))  # 进一步减少到2个样本
         prompt_strs = [train_prompts[i] for i in indices]
         output_strs = [train_answers[i] for i in indices]
         
