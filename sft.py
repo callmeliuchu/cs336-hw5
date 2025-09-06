@@ -15,7 +15,7 @@ import torch
 import random
 import os
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from rl import tokenize_prompt_and_output,get_response_log_probs,sft_microbatch_train_step,load_policy_into_vllm_instance
+from rl import tokenize_prompt_and_output,get_response_log_probs,sft_microbatch_train_step,load_policy_into_vllm_instance,init_vllm
 
 
 R1_ZERO_PROMPT = open('cs336_alignment/prompts/r1_zero.prompt', 'r').read()
@@ -96,18 +96,30 @@ def sft_experiment():
 
 
 
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            "Qwen/Qwen2.5-Math-1.5B",
+            torch_dtype=torch.float16,  # 使用半精度以节省显存
+            device_map="cuda:1",  # 指定使用GPU 1
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
+        )
+        print("✓ Training model loaded successfully")
+    except Exception as e:
+        print(f"Training model loading failed: {e}")
+        raise
     
-    # Initialize VLLM on CUDA 0 with base model
-    llm = LLM(
-        model="Qwen/Qwen2.5-Math-1.5B",
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.8,  # Reduce memory usage
-        dtype="half",  # Use half precision
-        max_model_len=2048  # Limit sequence length
-    )
-    
-    
-    print("VLLM initialized successfully!")
+    # 初始化vLLM推理模型
+    print(f"Initializing vLLM inference model...")
+    try:
+        vllm_model = init_vllm(
+            model_id="Qwen/Qwen2.5-Math-1.5B",
+            gpu_memory_utilization=0.85
+        )
+        print("✓ vLLM inference model initialized successfully")
+    except Exception as e:
+        print(f"vLLM initialization failed: {e}")
+        raise
     
     # Load training and validation data
     train_data = load_math_data('data/MATH/train.jsonl')
@@ -135,12 +147,7 @@ def sft_experiment():
         val_prompts.append(prompt_string)
         val_answers.append(p['answer'])
 
-    # Load model and tokenizer on CUDA 0
-    model = AutoModelForCausalLM.from_pretrained(
-        'Qwen/Qwen2.5-Math-1.5B',
-        torch_dtype=torch.float16,  # Use half precision to save memory
-        device_map="cuda:1"
-    )
+
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
@@ -172,7 +179,7 @@ def sft_experiment():
             torch.cuda.empty_cache()
             
             # Evaluate on validation set using VLLM
-            evaluate_with_vllm(val_prompts, val_answers, epoch, model, llm)
+            evaluate_with_vllm(val_prompts, val_answers, epoch, model, vllm_model)
             
             # Clear GPU cache after evaluation
             torch.cuda.empty_cache()
