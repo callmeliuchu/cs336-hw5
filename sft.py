@@ -137,7 +137,7 @@ def sft_experiment():
     model = AutoModelForCausalLM.from_pretrained(
         'Qwen/Qwen2.5-Math-1.5B',
         torch_dtype=torch.float16,  # Use half precision to save memory
-        device_map="cuda:1"
+        device_map="cuda:0"
     )
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
     
