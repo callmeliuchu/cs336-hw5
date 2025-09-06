@@ -190,7 +190,7 @@ def sft_experiment():
             tokenizer.save_pretrained(f'sft_model')
             print(f'Model saved to sft_model')
         
-        if (epoch+1) % 10 == 0:
+        if (epoch+1) % 2 == 0:
             # Clear GPU cache before evaluation
             torch.cuda.empty_cache()
             
