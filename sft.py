@@ -94,10 +94,8 @@ def sft_experiment():
     from vllm import LLM
     
 
-    
-    # Set CUDA_VISIBLE_DEVICES to use GPU 0 for VLLM evaluation
-    original_cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', None)
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+
+
     
     # Initialize VLLM on CUDA 0 with base model
     llm = LLM(
@@ -108,12 +106,6 @@ def sft_experiment():
         max_model_len=2048  # Limit sequence length
     )
     
-    # Restore original CUDA_VISIBLE_DEVICES
-    if original_cuda_visible is not None:
-        os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible
-    else:
-        os.environ.pop('CUDA_VISIBLE_DEVICES', None)
-
     
     print("VLLM initialized successfully!")
     
