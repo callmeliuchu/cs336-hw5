@@ -42,14 +42,16 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model):
         llm = LLM(
             model="Qwen/Qwen2.5-Math-1.5B",
             tensor_parallel_size=1,
-            gpu_memory_utilization=0.8
+            gpu_memory_utilization=0.6,  # Reduce memory usage
+            dtype="half",  # Use half precision
+            max_model_len=2048  # Limit sequence length
         )
         
         # Load the trained policy parameters into VLLM
         load_policy_into_vllm_instance(policy_model, llm)
         
-        # Sample a subset for evaluation (to speed up)
-        eval_indices = random.sample(range(len(val_prompts)), min(len(val_prompts), 100))
+        # Sample a subset for evaluation (to speed up and save memory)
+        eval_indices = random.sample(range(len(val_prompts)), min(len(val_prompts), 5))  # Reduce to 20 samples
         eval_prompts = [val_prompts[i] for i in eval_indices]
         eval_answers = [val_answers[i] for i in eval_indices]
         
@@ -135,17 +137,18 @@ def sft_experiment():
         val_answers.append(p['answer'])
 
     # Load model and tokenizer on CUDA 0
-    model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
+    model = AutoModelForCausalLM.from_pretrained(
+        'Qwen/Qwen2.5-Math-1.5B',
+        torch_dtype=torch.float16,  # Use half precision to save memory
+        device_map="cuda:0"
+    )
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
-    
-    # Move model to CUDA 0
-    model = model.to('cuda:0')
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
     for epoch in range(1000):
-        # Randomly sample training prompts and answers
-        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 16))
+        # Randomly sample training prompts and answers (reduce batch size to save memory)
+        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 8))  # Reduce to 8 samples
         prompt_strs = [train_prompts[i] for i in indices]
         output_strs = [train_answers[i] for i in indices]
         
@@ -166,8 +169,14 @@ def sft_experiment():
             tokenizer.save_pretrained(f'sft_model')
             print(f'Model saved to sft_model')
             
+            # Clear GPU cache before evaluation
+            torch.cuda.empty_cache()
+            
             # Evaluate on validation set using VLLM
             evaluate_with_vllm(val_prompts, val_answers, epoch, model)
+            
+            # Clear GPU cache after evaluation
+            torch.cuda.empty_cache()
 
 if __name__ == '__main__':
     sft_experiment()
