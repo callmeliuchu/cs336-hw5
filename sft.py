@@ -157,25 +157,54 @@ def sft_experiment():
 
 
 
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            "Qwen/Qwen2.5-Math-1.5B",
-            torch_dtype=torch.float16,  # 使用半精度以节省显存
-            device_map="cuda:1",  # 指定使用GPU 1
-            trust_remote_code=True,
-            low_cpu_mem_usage=True
-        )
-        print("✓ Training model loaded successfully")
-    except Exception as e:
-        print(f"Training model loading failed: {e}")
-        raise
+    # 检查是否有已微调好的模型
+    model_paths = [
+        "sft_model",  # 微调模型路径
+    ]
+    
+    loaded_model_path = None
+    for model_path in model_paths:
+        if os.path.exists(model_path) and os.path.exists(os.path.join(model_path, "config.json")):
+            print(f"🔍 Found existing model at: {model_path}")
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16,
+                    device_map="cuda:1",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True
+                )
+                loaded_model_path = model_path
+                print(f"✅ Successfully loaded existing model from: {model_path}")
+                break
+            except Exception as e:
+                print(f"❌ Failed to load model from {model_path}: {e}")
+                continue
+    
+    # 如果没有找到已微调的模型，加载原始模型
+    if loaded_model_path is None:
+        print("🆕 No existing model found, loading base model...")
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                "Qwen/Qwen2.5-Math-1.5B",
+                torch_dtype=torch.float16,  # 使用半精度以节省显存
+                device_map="cuda:1",  # 指定使用GPU 1
+                trust_remote_code=True,
+                low_cpu_mem_usage=True
+            )
+            print("✅ Base model loaded successfully")
+        except Exception as e:
+            print(f"❌ Base model loading failed: {e}")
+            raise
+    else:
+        print(f"🎯 Continuing training from: {loaded_model_path}")
     
     # 初始化vLLM推理模型
     print(f"Initializing vLLM inference model...")
     try:
         vllm_model = init_vllm(
             model_id="Qwen/Qwen2.5-Math-1.5B",
-            gpu_memory_utilization=0.7  # Reduce memory usage for vLLM
+            gpu_memory_utilization=0.8  # 增加vLLM显存使用率
         )
         print("✓ vLLM inference model initialized successfully")
     except Exception as e:
@@ -220,8 +249,8 @@ def sft_experiment():
         print(f"  95th percentile: {sequence_lengths[int(len(sequence_lengths)*0.95)]}")
         print(f"  99th percentile: {sequence_lengths[int(len(sequence_lengths)*0.99)]}")
         
-        # 建议合适的最大序列长度
-        suggested_max_len = min(2048, sequence_lengths[int(len(sequence_lengths)*0.95)])
+        # 建议合适的最大序列长度（利用更多显存）
+        suggested_max_len = min(4096, sequence_lengths[int(len(sequence_lengths)*0.98)])  # 使用98%分位数
         print(f"  Suggested max length: {suggested_max_len}")
     else:
         suggested_max_len = 1024
@@ -241,18 +270,48 @@ def sft_experiment():
     # 设置模型为训练模式
     model.train()
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
+    # 根据是否加载了已微调模型来调整学习率
+    if loaded_model_path is not None:
+        # 如果加载了已微调模型，使用更小的学习率继续训练
+        learning_rate = 5e-6
+        print(f"📚 Using reduced learning rate {learning_rate} for continued training")
+    else:
+        # 如果是从头开始训练，使用正常学习率
+        learning_rate = 1e-5
+        print(f"🆕 Using initial learning rate {learning_rate} for new training")
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, eps=1e-6)
 
     # 设置最大序列长度限制（基于数据分析结果）
     MAX_SEQUENCE_LENGTH = suggested_max_len
     print(f"Using max sequence length: {MAX_SEQUENCE_LENGTH}")
     
+    # 动态批次大小调整
+    current_batch_size = 32
+    max_batch_size = 64  # 最大批次大小
+    min_batch_size = 8   # 最小批次大小
+    
+    # 训练统计
+    best_loss = float('inf')
+    best_epoch = 0
+    total_epochs_trained = 0
+    
+    # 如果加载了已微调模型
+    if loaded_model_path is not None:
+        print(f"📊 Resuming training from existing model")
+    
+    print(f"🚀 Starting training...")
+    print(f"📈 Current batch size: {current_batch_size}")
+    print(f"📏 Max sequence length: {MAX_SEQUENCE_LENGTH}")
+    print(f"🎯 Learning rate: {learning_rate}")
+    print("=" * 60)
+    
     for epoch in range(200000):
         # Clear GPU cache before each epoch
         torch.cuda.empty_cache()
         
-        # Randomly sample training prompts and answers (reduce batch size to save memory)
-        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), 16))  # 进一步减少到2个样本
+        # Randomly sample training prompts and answers (动态批次大小)
+        indices = random.sample(range(len(train_prompts)), min(len(train_prompts), current_batch_size))
         prompt_strs = [train_prompts[i] for i in indices]
         output_strs = [train_answers[i] for i in indices]
         
@@ -272,14 +331,40 @@ def sft_experiment():
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated(model_device) / 1024**3  # GB
             reserved = torch.cuda.memory_reserved(model_device) / 1024**3   # GB
-            print(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB")
+            total_memory = torch.cuda.get_device_properties(model_device).total_memory / 1024**3  # GB
+            utilization = (allocated / total_memory) * 100
+            print(f"GPU Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB, Total: {total_memory:.2f}GB, Utilization: {utilization:.1f}%")
+            
+            # 动态调整批次大小
+            if utilization < 60 and current_batch_size < max_batch_size:
+                current_batch_size = min(max_batch_size, current_batch_size + 4)
+                print(f"📈 Increasing batch size to {current_batch_size} (utilization: {utilization:.1f}%)")
+            elif utilization > 85 and current_batch_size > min_batch_size:
+                current_batch_size = max(min_batch_size, current_batch_size - 4)
+                print(f"📉 Decreasing batch size to {current_batch_size} (utilization: {utilization:.1f}%)")
         
         try:
             policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
             optimizer.zero_grad()
             loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
             optimizer.step()
-            print(f'Epoch {epoch}, Loss: {loss.item():.4f}')
+            
+            # 更新训练统计
+            current_loss = loss.item()
+            total_epochs_trained += 1
+            
+            # 检查是否是最佳模型
+            if current_loss < best_loss:
+                best_loss = current_loss
+                best_epoch = total_epochs_trained
+                print(f'🏆 New best model! Epoch {total_epochs_trained}, Loss: {current_loss:.4f}')
+                
+                # 保存最佳模型到 sft_model
+                model.save_pretrained('sft_model')
+                tokenizer.save_pretrained('sft_model')
+                print(f'💾 Best model saved to sft_model')
+            else:
+                print(f'Epoch {total_epochs_trained}, Loss: {current_loss:.4f} (Best: {best_loss:.4f} @ Epoch {best_epoch})')
         except torch.cuda.OutOfMemoryError as e:
             print(f"❌ OOM at epoch {epoch}: {e}")
             print("Skipping this batch and reducing sequence length...")
@@ -292,9 +377,9 @@ def sft_experiment():
         
         if (epoch+1) % 200 == 0:
             # Save model
-            model.save_pretrained(f'sft_model')
-            tokenizer.save_pretrained(f'sft_model')
-            print(f'Model saved to sft_model')
+            model.save_pretrained('sft_model')
+            tokenizer.save_pretrained('sft_model')
+            print(f'💾 Model saved to sft_model')
         
         if (epoch+1) % 2 == 0:
             # Clear GPU cache before evaluation
