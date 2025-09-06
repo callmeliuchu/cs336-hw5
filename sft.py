@@ -134,7 +134,7 @@ def sft_experiment():
     )
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5,eps=1e-6)
 
     for epoch in range(1000):
         # Randomly sample training prompts and answers (reduce batch size to save memory)
