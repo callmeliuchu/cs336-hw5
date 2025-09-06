@@ -287,7 +287,7 @@ def sft_experiment():
     print(f"Using max sequence length: {MAX_SEQUENCE_LENGTH}")
     
     # 动态批次大小调整（更保守的设置）
-    current_batch_size = 8  # 从更小的批次开始
+    current_batch_size = 16  # 从更小的批次开始
     max_batch_size = 16  # 降低最大批次大小
     min_batch_size = 2   # 最小批次大小
     
