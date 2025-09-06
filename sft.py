@@ -95,14 +95,24 @@ def sft_experiment():
     
 
     
-    # Initialize VLLM on CUDA 1 with base model
+    # Set CUDA_VISIBLE_DEVICES to use GPU 0 for VLLM evaluation
+    original_cuda_visible = os.environ.get('CUDA_VISIBLE_DEVICES', None)
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    
+    # Initialize VLLM on CUDA 0 with base model
     llm = LLM(
         model="Qwen/Qwen2.5-Math-1.5B",
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.6,  # Reduce memory usage
+        gpu_memory_utilization=0.8,  # Reduce memory usage
         dtype="half",  # Use half precision
         max_model_len=2048  # Limit sequence length
     )
+    
+    # Restore original CUDA_VISIBLE_DEVICES
+    if original_cuda_visible is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = original_cuda_visible
+    else:
+        os.environ.pop('CUDA_VISIBLE_DEVICES', None)
 
     
     print("VLLM initialized successfully!")
@@ -137,7 +147,7 @@ def sft_experiment():
     model = AutoModelForCausalLM.from_pretrained(
         'Qwen/Qwen2.5-Math-1.5B',
         torch_dtype=torch.float16,  # Use half precision to save memory
-        device_map="cuda:0"
+        device_map="cuda:1"
     )
     tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
     
@@ -150,11 +160,10 @@ def sft_experiment():
         output_strs = [train_answers[i] for i in indices]
         
         res = tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer)
-        # Move input data to the same device as the model
-        model_device = next(model.parameters()).device      
-        input_ids = res['input_ids'].to(model_device)
-        labels = res['labels'].to(model_device)
-        response_mask = res['response_mask'].to(model_device)
+        # Move input data to GPU 1 for training
+        input_ids = res['input_ids'].to('cuda:1')
+        labels = res['labels'].to('cuda:1')
+        response_mask = res['response_mask'].to('cuda:1')
         policy_log_probs = get_response_log_probs(model, input_ids, labels)['log_probs']
         optimizer.zero_grad()
         loss, _ = sft_microbatch_train_step(policy_log_probs, response_mask, gradient_accumulation_steps=1, normalize_constant=1.0)
