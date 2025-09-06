@@ -28,22 +28,11 @@ def load_math_data(data_path):
             data.append(json.loads(line))
     return data
 
-def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model):
+def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model, llm):
     """Evaluate model using VLLM on CUDA 1"""
     try:
-        from vllm import LLM, SamplingParams
+        from vllm import SamplingParams
         import re
-        
-        # Set CUDA_VISIBLE_DEVICES to use GPU 1
-        
-        # Initialize VLLM on CUDA 1 with base model
-        llm = LLM(
-            model="Qwen/Qwen2.5-Math-1.5B",
-            tensor_parallel_size=1,
-            gpu_memory_utilization=0.6,  # Reduce memory usage
-            dtype="half",  # Use half precision
-            max_model_len=2048  # Limit sequence length
-        )
         
         # Load the trained policy parameters into VLLM
         load_policy_into_vllm_instance(policy_model, llm)
@@ -100,6 +89,24 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model):
         pass
 
 def sft_experiment():
+    # Initialize VLLM for evaluation (only once)
+    print("Initializing VLLM for evaluation...")
+    from vllm import LLM
+    
+
+    
+    # Initialize VLLM on CUDA 1 with base model
+    llm = LLM(
+        model="Qwen/Qwen2.5-Math-1.5B",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.6,  # Reduce memory usage
+        dtype="half",  # Use half precision
+        max_model_len=2048  # Limit sequence length
+    )
+
+    
+    print("VLLM initialized successfully!")
+    
     # Load training and validation data
     train_data = load_math_data('data/MATH/train.jsonl')
     val_data = load_math_data('data/MATH/validation.jsonl')
@@ -164,7 +171,7 @@ def sft_experiment():
             torch.cuda.empty_cache()
             
             # Evaluate on validation set using VLLM
-            evaluate_with_vllm(val_prompts, val_answers, epoch, model)
+            evaluate_with_vllm(val_prompts, val_answers, epoch, model, llm)
             
             # Clear GPU cache after evaluation
             torch.cuda.empty_cache()
