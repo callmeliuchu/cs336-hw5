@@ -273,11 +273,11 @@ def sft_experiment():
     # 根据是否加载了已微调模型来调整学习率
     if loaded_model_path is not None:
         # 如果加载了已微调模型，使用更小的学习率继续训练
-        learning_rate = 1e-6
+        learning_rate = 1e-3
         print(f"📚 Using reduced learning rate {learning_rate} for continued training")
     else:
         # 如果是从头开始训练，使用正常学习率
-        learning_rate = 1e-6
+        learning_rate = 1e-3
         print(f"🆕 Using initial learning rate {learning_rate} for new training")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, eps=1e-6)
