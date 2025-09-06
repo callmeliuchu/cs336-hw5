@@ -12,8 +12,9 @@ Deliverable: Report the size of the dataset and the validation accuracy curve yo
 Compare your findings to the previous SFT experiment."""
 import json
 import torch
+import random
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from rl import tokenize_prompt_and_output,sample_data,get_response_log_probs,sft_microbatch_train_step
+from rl import tokenize_prompt_and_output,get_response_log_probs,sft_microbatch_train_step
 
 
 R1_ZERO_PROMPT = open('cs336_alignment/prompts/r1_zero.prompt', 'r').read()
@@ -22,16 +23,16 @@ def sft_experiment():
     with open('data/MATH/validation.jsonl', 'r') as f:
         prompt_data = [json.loads(json_line) for json_line in f]
     
-    # Prepare data in the format expected by sample_data
-    data_arr = []
+    # Prepare prompts and answers
+    prompts = []
+    answers = []
+    
     for p in prompt_data:
         prompt_string = R1_ZERO_PROMPT.format(
             question=p['problem']
         )
-        data_arr.append({
-            'question': prompt_string,
-            'answer': p['answer']
-        })
+        prompts.append(prompt_string)
+        answers.append(p['answer'])
     
 
     model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-Math-1.5B')
@@ -40,7 +41,10 @@ def sft_experiment():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
 
     for epoch in range(1000):
-        prompt_strs, output_strs = sample_data(data_arr)
+        # Randomly sample prompts and answers
+        indices = random.sample(range(len(prompts)), min(len(prompts), 16))  # Sample up to 100 examples
+        prompt_strs = [prompts[i] for i in indices]
+        output_strs = [answers[i] for i in indices]
         res = tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer)
         policy_log_probs = get_response_log_probs(model, res['input_ids'], res['labels'])['log_probs']
         response_mask = res['response_mask']
