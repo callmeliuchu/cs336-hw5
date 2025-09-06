@@ -57,19 +57,37 @@ def evaluate_with_vllm(val_prompts, val_answers, epoch, policy_model):
         sampling_params = SamplingParams(temperature=0.0, max_tokens=512)
         outputs = llm.generate(eval_prompts, sampling_params)
         
-        # Calculate accuracy
+        # Calculate accuracy and show examples
         correct = 0
+        print(f"\n=== Epoch {epoch} - Validation Examples ===")
+        
         for i, output in enumerate(outputs):
             generated_text = output.outputs[0].text.strip()
+            true_answer = eval_answers[i].strip()
+            
             # Extract the final answer (assuming it's in a boxed format)
             answer_match = re.search(r'\\boxed\{([^}]+)\}', generated_text)
             if answer_match:
                 predicted_answer = answer_match.group(1).strip()
-                if predicted_answer == eval_answers[i].strip():
+                is_correct = predicted_answer == true_answer
+                if is_correct:
                     correct += 1
+            else:
+                predicted_answer = "No boxed answer found"
+                is_correct = False
+            
+            # Show first 3 examples
+            if i < 3:
+                print(f"\n--- Example {i+1} ---")
+                print(f"Question: {eval_prompts[i][:200]}...")
+                print(f"Generated Response: {generated_text[:300]}...")
+                print(f"True Answer: {true_answer}")
+                print(f"Predicted Answer: {predicted_answer}")
+                print(f"Correct: {is_correct}")
         
         accuracy = correct / len(eval_prompts)
-        print(f'Epoch {epoch} - Validation Accuracy: {accuracy:.4f} ({correct}/{len(eval_prompts)})')
+        print(f"\nEpoch {epoch} - Validation Accuracy: {accuracy:.4f} ({correct}/{len(eval_prompts)})")
+        print("=" * 50)
         
         # Restore original CUDA_VISIBLE_DEVICES
         if original_cuda_visible is not None:
